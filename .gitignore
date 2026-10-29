@@ -1,0 +1,31 @@
+# Build outputs & binaries
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+surreal-editor
+surreal-bench
+surreal_live_dojo
+test_skin_pose
+test_stb_load
+test_surreal_benchmark
+test_surreal_gltf
+test_surreal_interactive
+test_texture_bake
+test_texture_inspect
+build/
+bin/
+
+# Temporary / OS
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+*~
+
+# Exclude large binary dumps if any
+*.a3d
+*.iso

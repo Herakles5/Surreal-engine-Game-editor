@@ -1,0 +1,67 @@
+{
+  "engine": "AION Surreal 3D Engine",
+  "version": 1.0,
+  "entity_count": 6,
+  "entities": [
+    {
+      "id": 1,
+      "name": "CyberGridFloor",
+      "type": "TERRAIN",
+      "position": [0, 0, 0],
+      "scale": [24, 0.1, 24],
+      "color": [1, 1, 1],
+      "metallic": 0.2,
+      "roughness": 0.55
+    },
+    {
+      "id": 6,
+      "name": "SurrealAvatarPrime",
+      "type": "AVATAR",
+      "position": [0, 0, 0],
+      "scale": [1, 1, 1],
+      "color": [1, 1, 1],
+      "metallic": 0.1,
+      "roughness": 0.5
+    },
+    {
+      "id": 2,
+      "name": "Platform_Low",
+      "type": "PLATFORM",
+      "position": [-1.8, 0.25, -2.6],
+      "scale": [1.8, 0.5, 1.8],
+      "color": [0, 0.95, 0.85],
+      "metallic": 0.9,
+      "roughness": 0.2
+    },
+    {
+      "id": 3,
+      "name": "Platform_Mid",
+      "type": "PLATFORM",
+      "position": [0, 0.475, -3.4],
+      "scale": [2.2, 0.95, 2.2],
+      "color": [1, 0.15, 0.65],
+      "metallic": 0.35,
+      "roughness": 0.4
+    },
+    {
+      "id": 4,
+      "name": "Platform_High",
+      "type": "PLATFORM",
+      "position": [2, 0.7, -1.8],
+      "scale": [1.8, 1.4, 1.8],
+      "color": [1, 0.85, 0.2],
+      "metallic": 0.35,
+      "roughness": 0.4
+    },
+    {
+      "id": 5,
+      "name": "Platform_Apex",
+      "type": "PLATFORM",
+      "position": [-0.8, 0.925, -5.2],
+      "scale": [2, 1.85, 2],
+      "color": [0.3, 0.65, 1],
+      "metallic": 0.35,
+      "roughness": 0.4
+    }
+  ]
+}
