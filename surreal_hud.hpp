@@ -296,7 +296,7 @@ public:
         // Controls hint
         DrawString(fb, screenW, screenH, panelX + 12, panelY + 172, "[SPACE] Jump | [WASD] Run | [Q/E] Cam Orbit", 0xFF00FFCC, 1);
         DrawString(fb, screenW, screenH, panelX + 12, panelY + 186, "[L-DRAG] Free Cam | [WHEEL/Z/X] Zoom (1.2-6m)", 0xFF8899AA, 1);
-        DrawString(fb, screenW, screenH, panelX + 12, panelY + 200, "[B] Benchmark | [V/R] Reset Cam | [P] Pause", 0xFF8899AA, 1);
+        DrawString(fb, screenW, screenH, panelX + 12, panelY + 200, "[V] Cycle Dancer/Avatar | [P] Pause | [B] Bench", 0xFFFFAA00, 1);
 
         // 2. Active Benchmark Progress Banner (Positioned cleanly below top bar)
         if (isBenchmarkRunning) {

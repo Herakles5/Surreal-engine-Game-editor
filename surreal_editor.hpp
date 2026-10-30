@@ -76,14 +76,29 @@ public:
 
     // 3D Model Folder Browser
     std::vector<std::string> modelFolders = {
-        "assets/models",
+        "/root/coding/Surreal-engine-Game-editor/assets/models",
         "/root/coding/MeinOS/surreal_engine/assets/models",
+        "assets/models",
         "/opt/meinos",
         "assets/custom_models",
         "/root/Downloads"
     };
     int activeFolderIndex = 0;
     std::vector<DiscoveredModelFile> folderModels;
+
+    enum class CatalogCategory {
+        DANCERS = 0,
+        AVATARS = 1,
+        WORLDS_PROPS = 2,
+        ALL = 3
+    };
+    CatalogCategory activeCategory = CatalogCategory::DANCERS;
+    std::vector<DiscoveredModelFile> activeCatalogList;
+
+    // Placed skeletal animated entities (NPC dancers in the world)
+    std::shared_ptr<SkeletalMeshInstance> placementSkeletal;
+    std::unordered_map<EntityID, std::shared_ptr<SkeletalMeshInstance>> animatedEntities;
+
     int catalogPage = 0;
     static constexpr int ITEMS_PER_PAGE = 8;
 
@@ -182,9 +197,108 @@ public:
 
     // --- 3D MODEL LOADER, FOLDER IMPORTER & PLACEMENT LOGIC ---
 
+    static bool IsDanceModel(const std::string& name) {
+        std::string lower = name;
+        for (char& c : lower) c = tolower(c);
+        return (lower.find("dance") != std::string::npos ||
+                lower.find("dancing") != std::string::npos ||
+                lower.find("gangnam") != std::string::npos ||
+                lower.find("samba") != std::string::npos ||
+                lower.find("hip_hop") != std::string::npos ||
+                lower.find("chicken") != std::string::npos ||
+                lower.find("spooky") != std::string::npos ||
+                lower.find("miku") != std::string::npos ||
+                lower.find("ivonne") != std::string::npos ||
+                lower.find("moon") != std::string::npos ||
+                lower.find("monk") != std::string::npos ||
+                lower.find("dragon") != std::string::npos ||
+                lower.find("swimsuit") != std::string::npos ||
+                lower.find("solar") != std::string::npos);
+    }
+
+    static bool IsAvatarModel(const std::string& name) {
+        std::string lower = name;
+        for (char& c : lower) c = tolower(c);
+        return (lower.find("aion") != std::string::npos ||
+                lower.find("avatar") != std::string::npos ||
+                lower.find("model_") != std::string::npos ||
+                lower.find("mia") != std::string::npos);
+    }
+
+    static bool IsWorldOrPropModel(const std::string& name) {
+        std::string lower = name;
+        for (char& c : lower) c = tolower(c);
+        return (lower.find("city") != std::string::npos ||
+                lower.find("seoul") != std::string::npos ||
+                lower.find("pylon") != std::string::npos ||
+                lower.find("drone") != std::string::npos ||
+                lower.find("turret") != std::string::npos ||
+                lower.find("bike") != std::string::npos);
+    }
+
+    static std::string GetCleanName(const std::string& filename) {
+        std::string lower = filename;
+        for (char& c : lower) c = tolower(c);
+        if (lower.find("wednesday") != std::string::npos) return "Wednesday Gangnam Style";
+        if (lower.find("miku") != std::string::npos) return "Hatsune Miku Pop Dance";
+        if (lower.find("stormtrooper") != std::string::npos) return "Dancing Stormtrooper";
+        if (lower.find("yua_han") != std::string::npos) return "Yua Han Samba Dance";
+        if (lower.find("skeleton_chicken") != std::string::npos) return "Skeleton Chicken Dance";
+        if (lower.find("spooky_skeleton") != std::string::npos) return "Spooky Skeleton Dance";
+        if (lower.find("hip_hop") != std::string::npos) return "Hip Hop Breakdance";
+        if (lower.find("ivonne") != std::string::npos) return "Ivonne Latin Dance";
+        if (lower.find("moon") != std::string::npos) return "Moonwalk Dancer";
+        if (lower.find("avatarsample_b") != std::string::npos) return "Graceful Dance (Sample B)";
+        if (lower.find("kachujin") != std::string::npos) return "Kachujin Chicken Dance";
+        if (lower.find("dragon") != std::string::npos) return "Black Dragon (Animated)";
+        if (lower.find("kitten") != std::string::npos) return "Kitten Monk Kung-Fu";
+        if (lower.find("mint") != std::string::npos) return "Mint Swimsuit Animated";
+        if (lower.find("solar") != std::string::npos) return "Solar System Orbit";
+        if (lower.find("seoul_city_pbr") != std::string::npos) return "Seoul City (PBR Street)";
+        if (lower.find("seoul_city_original") != std::string::npos) return "Seoul City (Original)";
+
+        std::string base = filename;
+        size_t dot = base.rfind('.');
+        if (dot != std::string::npos) base = base.substr(0, dot);
+        return base;
+    }
+
+    void UpdateCatalogFilter() {
+        activeCatalogList.clear();
+        for (const auto& item : folderModels) {
+            if (activeCategory == CatalogCategory::ALL) {
+                activeCatalogList.push_back(item);
+            } else if (activeCategory == CatalogCategory::DANCERS) {
+                if (IsDanceModel(item.filename)) activeCatalogList.push_back(item);
+            } else if (activeCategory == CatalogCategory::AVATARS) {
+                if (IsAvatarModel(item.filename) && !IsDanceModel(item.filename)) activeCatalogList.push_back(item);
+            } else if (activeCategory == CatalogCategory::WORLDS_PROPS) {
+                if (IsWorldOrPropModel(item.filename) || item.extension == ".obj") activeCatalogList.push_back(item);
+            }
+        }
+        if (activeCatalogList.empty()) {
+            activeCatalogList = folderModels;
+        }
+        catalogPage = 0;
+    }
+
+    void CycleCategory() {
+        switch (activeCategory) {
+            case CatalogCategory::DANCERS: activeCategory = CatalogCategory::AVATARS; break;
+            case CatalogCategory::AVATARS: activeCategory = CatalogCategory::WORLDS_PROPS; break;
+            case CatalogCategory::WORLDS_PROPS: activeCategory = CatalogCategory::ALL; break;
+            case CatalogCategory::ALL: activeCategory = CatalogCategory::DANCERS; break;
+        }
+        UpdateCatalogFilter();
+        std::string catName = (activeCategory == CatalogCategory::DANCERS) ? "DANCING MODELS" :
+                              (activeCategory == CatalogCategory::AVATARS) ? "AION AVATARS" :
+                              (activeCategory == CatalogCategory::WORLDS_PROPS) ? "WORLDS & PROPS" : "ALL MODELS";
+        SetStatus("[*] Category: " + catName + " (" + std::to_string(activeCatalogList.size()) + " files)", 3.0f);
+    }
+
     int GetTotalCatalogPages() const {
-        if (folderModels.empty()) return 1;
-        return (static_cast<int>(folderModels.size()) + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE;
+        if (activeCatalogList.empty()) return 1;
+        return (static_cast<int>(activeCatalogList.size()) + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE;
     }
 
     void CatalogNextPage() {
@@ -212,11 +326,11 @@ public:
         if (catalogPage >= totalPages) catalogPage = totalPages - 1;
         if (catalogPage < 0) catalogPage = 0;
         g.pageStart = catalogPage * ITEMS_PER_PAGE;
-        g.pageEnd = std::min(g.pageStart + ITEMS_PER_PAGE, static_cast<int>(folderModels.size()));
+        g.pageEnd = std::min(g.pageStart + ITEMS_PER_PAGE, static_cast<int>(activeCatalogList.size()));
         g.pageCount = std::max(0, g.pageEnd - g.pageStart);
         g.rows = std::max(1, g.pageCount);
-        g.w = 620;
-        g.h = 215 + g.rows * 22;
+        g.w = 640;
+        g.h = 220 + g.rows * 22;
         g.x = (screenW - g.w) / 2;
         g.y = (screenH - g.h) / 2;
         g.listY = g.y + 58;
@@ -231,7 +345,7 @@ public:
         // slot: 1..8 page items, 9/10/11 = builtin presets 1/2/4
         if (slot >= 1 && slot <= ITEMS_PER_PAGE) {
             int idx = catalogPage * ITEMS_PER_PAGE + (slot - 1);
-            if (idx >= static_cast<int>(folderModels.size())) return false;
+            if (idx >= static_cast<int>(activeCatalogList.size())) return false;
             SelectFolderModel(idx, avatarMesh);
         } else if (slot == 9) {
             SelectBuiltinPreset(1, avatarMesh);
@@ -262,12 +376,14 @@ public:
                 }
             }
         }
+        UpdateCatalogFilter();
     }
 
     void CycleModelFolder() {
         activeFolderIndex = (activeFolderIndex + 1) % modelFolders.size();
         catalogPage = 0;
         folderModels = SurrealModelLoader::ScanFolder(modelFolders[activeFolderIndex]);
+        UpdateCatalogFilter();
         SetStatus("[*] Switched 3D Folder: " + modelFolders[activeFolderIndex] + " (" + std::to_string(folderModels.size()) + " models found)");
     }
 
@@ -275,28 +391,35 @@ public:
         showModelCatalog = !showModelCatalog;
         if (showModelCatalog) {
             RefreshModelFolder();
-            SetStatus("[*] 3D Model Importer: " + std::to_string(folderModels.size()) + " models found. Choose [1]-[8] or Page with [,] [.]", 4.0f);
+            std::string catName = (activeCategory == CatalogCategory::DANCERS) ? "DANCERS" :
+                                  (activeCategory == CatalogCategory::AVATARS) ? "AVATARS" :
+                                  (activeCategory == CatalogCategory::WORLDS_PROPS) ? "WORLDS" : "ALL";
+            SetStatus("[*] 3D Model Importer [" + catName + "]: " + std::to_string(activeCatalogList.size()) + " items. Choose [1]-[8], [T] Category, [,] [.] Page", 4.0f);
         }
     }
 
     void SelectFolderModel(int fileIndex, const std::shared_ptr<SurrealMesh>& avatarMesh = nullptr) {
-        if (fileIndex < 0 || fileIndex >= static_cast<int>(folderModels.size())) return;
-        const auto& file = folderModels[fileIndex];
+        if (fileIndex < 0 || fileIndex >= static_cast<int>(activeCatalogList.size())) return;
+        const auto& file = activeCatalogList[fileIndex];
 
         placementScale = Vec3(1.0f, 1.0f, 1.0f);
         placementYaw = 0.0f;
         placementColor = ColorRGB(1.0f, 1.0f, 1.0f); // Default neutral albedo for textured models
         placementMetallic = 0.25f;
         placementRoughness = 0.45f;
+        placementSkeletal = nullptr;
 
         bool loaded = false;
         if (file.extension == ".obj") {
             placementColor = colorPalette[currentPaletteIdx % colorPalette.size()];
             loaded = SurrealModelLoader::LoadCustomFile(file.fullPath, placementMesh, placementColor);
         } else if (file.extension == ".gltf" || file.extension == ".glb") {
-            SkeletalMeshInstance inst;
-            loaded = SurrealSkeletalLoader::LoadSkeletalModel(file.fullPath, inst);
-            if (loaded) placementMesh = inst.activeDeformedMesh;
+            auto inst = std::make_shared<SkeletalMeshInstance>();
+            loaded = SurrealSkeletalLoader::LoadSkeletalModel(file.fullPath, *inst);
+            if (loaded) {
+                placementMesh = inst->activeDeformedMesh;
+                placementSkeletal = inst;
+            }
         }
 
         if (!loaded || !placementMesh) {
@@ -305,9 +428,7 @@ public:
         }
 
         // Clean name without extension
-        std::string baseName = file.filename;
-        size_t dot = baseName.rfind('.');
-        if (dot != std::string::npos) baseName = baseName.substr(0, dot);
+        std::string baseName = GetCleanName(file.filename);
         placementName = baseName + "_" + std::to_string(entities.size() + 1);
 
         // Normalize scale
@@ -322,6 +443,14 @@ public:
                                   baseName.find("World") != std::string::npos);
             if (isEnvironment) {
                 scaleFactor = 1.0f; // Keep real-world 1:1 scale for cities & environments!
+            } else if (IsDanceModel(file.filename) || IsAvatarModel(file.filename)) {
+                // Humanoid characters: normalize height to ~1.80m tall
+                float charHeight = placementMesh->worldBounds.max.y - placementMesh->worldBounds.min.y;
+                if (charHeight > 0.05f) {
+                    scaleFactor = 1.80f / charHeight;
+                } else {
+                    scaleFactor = 1.8f / maxDim;
+                }
             } else if (maxDim > 50.0f) {
                 scaleFactor = 2.0f / maxDim;
             } else if (maxDim < 0.2f) {
@@ -481,6 +610,11 @@ public:
 
         entities.push_back(ed);
         selectedIndex = static_cast<int>(entities.size() - 1);
+
+        if (placementSkeletal) {
+            animatedEntities[newEntity] = placementSkeletal;
+            placementSkeletal = nullptr;
+        }
 
         SyncObstacles(obstacles);
         isPlacingModel = false;
@@ -666,6 +800,7 @@ public:
         }
 
         std::string delName = ent->name;
+        animatedEntities.erase(ent->id);
         world.DestroyEntity(ent->id);
         entities.erase(entities.begin() + selectedIndex);
         if (selectedIndex >= static_cast<int>(entities.size())) {
@@ -674,6 +809,12 @@ public:
 
         SyncObstacles(obstacles);
         SetStatus("[-] Deleted Entity: " + delName);
+    }
+
+    void UpdateAnimations(float dt) {
+        for (auto& pair : animatedEntities) {
+            if (pair.second) pair.second->Update(dt);
+        }
     }
 
     // Save Level to JSON
@@ -939,39 +1080,43 @@ public:
 
             char folderBuf[160];
             std::string dispFolder = modelFolders[activeFolderIndex % modelFolders.size()];
-            std::snprintf(folderBuf, sizeof(folderBuf), "Folder: [%s] (%zu files) | Page %d/%d",
-                          dispFolder.c_str(), folderModels.size(), catalogPage + 1, totalPages);
+            std::string catName = (activeCategory == CatalogCategory::DANCERS) ? "DANCING MODELS" :
+                                  (activeCategory == CatalogCategory::AVATARS) ? "AION AVATARS" :
+                                  (activeCategory == CatalogCategory::WORLDS_PROPS) ? "WORLDS & PROPS" : "ALL MODELS";
+            std::snprintf(folderBuf, sizeof(folderBuf), "Category: [%s] (Press [T]) | Folder: [%s] (%zu files) | Page %d/%d",
+                          catName.c_str(), dispFolder.c_str(), activeCatalogList.size(), catalogPage + 1, totalPages);
             SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, diagY + 34, folderBuf, 0xFF88AABB, 1);
             SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, diagY + 46, "-------------------------------------------------------------", 0xFF335577, 1);
 
             int yPos = g.listY;
             for (int i = g.pageStart; i < g.pageEnd; ++i) {
                 int keyNum = (i - g.pageStart) + 1;
-                const auto& item = folderModels[i];
+                const auto& item = activeCatalogList[i];
                 char lineBuf[160];
                 float kb = item.sizeBytes / 1024.0f;
-                std::string displayName = item.filename;
-                if (displayName.length() > 28) displayName = displayName.substr(0, 26) + "..";
-                std::snprintf(lineBuf, sizeof(lineBuf), "[%d] %-28s  %7.1f KB  [%s]",
-                              keyNum, displayName.c_str(), kb, item.extension.c_str());
+                std::string cleanName = GetCleanName(item.filename);
+                if (cleanName.length() > 28) cleanName = cleanName.substr(0, 26) + "..";
 
-                // Color highlight: Neon Pink for Avatars, Radiant Gold for Cities/Maps
                 uint32_t itemCol = 0xFF00E5FF;
-                if (item.filename.find("Aion") != std::string::npos ||
-                    item.filename.find("Avatar") != std::string::npos ||
-                    item.filename.find("model_") != std::string::npos)
-                {
-                    itemCol = 0xFFFF00DD; // Neon Pink for Aion Avatars
-                } else if (item.filename.find("City") != std::string::npos ||
-                           item.filename.find("Seoul") != std::string::npos)
-                {
-                    itemCol = 0xFFFFCC00; // Radiant Gold for City / World Maps!
+                const char* tag = "[PROP]";
+                if (IsDanceModel(item.filename)) {
+                    itemCol = 0xFFFF1493; // Deep / Hot Pink
+                    tag = "[DANCE]";
+                } else if (IsAvatarModel(item.filename)) {
+                    itemCol = 0xFFFF00DD; // Neon Magenta
+                    tag = "[AVATAR]";
+                } else if (IsWorldOrPropModel(item.filename)) {
+                    itemCol = 0xFFFFCC00; // Radiant Gold
+                    tag = "[WORLD]";
                 }
+
+                std::snprintf(lineBuf, sizeof(lineBuf), "[%d] %-7s %-28s %6.0f KB",
+                              keyNum, tag, cleanName.c_str(), kb);
                 SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos, lineBuf, itemCol, 1);
                 yPos += 22;
             }
             if (g.pageCount == 0) {
-                SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos, "[ No 3D models found in this directory ]", 0xFF888888, 1);
+                SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos, "[ No 3D models found in this category ]", 0xFF888888, 1);
             }
 
             char pageNavBuf[128];
@@ -984,7 +1129,7 @@ public:
             SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, g.presetY + 20, "[0] Cyber Monolith (Sci-Fi Beveled Obelisk)", 0xFFFFCC00, 1);
             SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, g.presetY + 40, "[M] Mia Avatar Clone (glTF Rigged Character)", 0xFFFF007F, 1);
             SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, g.presetY + 66,
-                                   "[1]-[8] Select | [,][.] Page | [TAB] Folder | [F5] Rescan | [ESC] Close", 0xFF00FF88, 1);
+                                   "[1]-[8] Place NPC | [SH+1]-[8] Play As Avatar | [T] Category | [,][.] Page | [ESC] Close", 0xFF00FF88, 1);
         }
 
         // 4. Mouse / Keyboard Placement HUD Banner

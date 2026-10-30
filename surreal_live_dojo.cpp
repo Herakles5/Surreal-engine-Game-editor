@@ -19,6 +19,75 @@
 #include <vector>
 #include <chrono>
 
+// List of dancing models & avatars available for fast swapping
+static const std::vector<std::pair<std::string, std::string>> g_availableAvatars = {
+    {"mia", "/root/coding/MeinOS/avatar/scene.gltf"},
+    {"wednesday", "assets/models/wednesday_gangnam_style.glb"},
+    {"miku", "assets/models/miku_-_dance_animation.glb"},
+    {"stormtrooper", "assets/models/dancing_stormtrooper.glb"},
+    {"skeleton", "assets/models/skeleton_chicken_dance_1.glb"},
+    {"yua", "assets/models/yua_han_samba_dancing.glb"},
+    {"hiphop", "assets/models/hip_hop_dancing.glb"},
+    {"ivonne", "assets/models/ivonne_dance.glb"},
+    {"moon", "assets/models/moon_dance.glb"},
+    {"chicken", "assets/models/614230008_kachujin_g_rosales_chicken_dance.glb"},
+    {"spooky", "assets/models/spooky_skeleton_dance_2.glb"},
+    {"sample_b", "assets/models/avatarsample_b-dance_graceful.glb"},
+    {"dragon", "assets/models/black_dragon_with_idle_animation.glb"},
+    {"kitten", "assets/models/kitten_monk.glb"},
+    {"mint", "assets/models/mint_swimsuit_animated-_neverness_to_everness.glb"}
+};
+static int g_currentAvatarIndex = 0;
+
+static bool SetPlayerAvatar(
+    const std::string& glbPath,
+    Surreal::SurrealEngine& engine,
+    Surreal::SkeletalMeshInstance& character,
+    Surreal::EntityID avatarEntity,
+    Surreal::SurrealEditor& editor)
+{
+    std::string actualPath = glbPath;
+    if (!std::filesystem::exists(actualPath)) {
+        actualPath = "/root/coding/Surreal-engine-Game-editor/" + glbPath;
+    }
+    if (!std::filesystem::exists(actualPath)) {
+        actualPath = "/root/coding/MeinOS/surreal_engine/" + glbPath;
+    }
+
+    Surreal::SkeletalMeshInstance newChar;
+    if (!Surreal::SurrealSkeletalLoader::LoadSkeletalModel(actualPath, newChar)) {
+        std::cerr << "[-] Failed to load avatar from: " << actualPath << "\n";
+        editor.SetStatus("[-] Failed to load avatar: " + actualPath, 4.0f);
+        return false;
+    }
+
+    character = std::move(newChar);
+
+    // Auto-calculate humanoid scale to normalize to ~1.80m tall
+    character.activeDeformedMesh->CalculateBounds();
+    float height = character.activeDeformedMesh->worldBounds.max.y - character.activeDeformedMesh->worldBounds.min.y;
+    float scaleFactor = 1.0f;
+    if (height > 0.05f) {
+        scaleFactor = 1.80f / height;
+    }
+
+    Surreal::TransformComponent& ct = engine.world.transforms[avatarEntity];
+    ct.scale = Surreal::Vec3(scaleFactor, scaleFactor, scaleFactor);
+
+    Surreal::MeshRendererComponent& mr = engine.world.meshRenderers[avatarEntity];
+    mr.mesh = character.activeDeformedMesh;
+
+    std::string filename = std::filesystem::path(actualPath).filename().string();
+    std::string cleanName = Surreal::SurrealEditor::GetCleanName(filename);
+    std::string clipName = character.clips.empty() ? "None" : character.clips[0].name;
+
+    char msgBuf[160];
+    std::snprintf(msgBuf, sizeof(msgBuf), "[✓] Avatar: %s | Dance: %s", cleanName.c_str(), clipName.c_str());
+    editor.SetStatus(msgBuf, 4.0f);
+    std::cout << "[✓] Player Avatar Switched to: " << cleanName << " (Height: " << height << " -> Scale: " << scaleFactor << ", Clip: " << clipName << ")\n";
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     bool headless = false;
     bool startInEditor = false;
@@ -26,15 +95,19 @@ int main(int argc, char* argv[]) {
     bool useAionLink = true;
     bool loadCity = true; // Default: Seoul City 3D photorealistic environment
     bool loadParkour = false;
+    std::string requestedAvatar = "";
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--fullscreen") startFullscreen = true;
-        if (std::string(argv[i]) == "--no-aion") useAionLink = false;
-        if (std::string(argv[i]) == "--no-city" || std::string(argv[i]) == "--bare") loadCity = false;
-        if (std::string(argv[i]) == "--seoul" || std::string(argv[i]) == "--city") loadCity = true;
-        if (std::string(argv[i]) == "--parkour") loadParkour = true;
-        if (std::string(argv[i]) == "--benchmark-headless") {
+        std::string arg = argv[i];
+        if (arg == "--fullscreen") startFullscreen = true;
+        if (arg == "--no-aion") useAionLink = false;
+        if (arg == "--no-city" || arg == "--bare") loadCity = false;
+        if (arg == "--seoul" || arg == "--city") loadCity = true;
+        if (arg == "--parkour") loadParkour = true;
+        if (arg == "--avatar" && i + 1 < argc) requestedAvatar = argv[++i];
+        else if (arg.rfind("--avatar=", 0) == 0) requestedAvatar = arg.substr(9);
+        if (arg == "--benchmark-headless") {
             headless = true;
-        } else if (std::string(argv[i]) == "--editor") {
+        } else if (arg == "--editor") {
             startInEditor = true;
         }
     }
@@ -230,6 +303,23 @@ int main(int argc, char* argv[]) {
             std::cout << "[✓] Seoul City 3D Environment Spawned into Live Scene!\n";
         }
     }
+
+    // Apply requested avatar if specified via CLI
+    if (!requestedAvatar.empty()) {
+        std::string targetPath = requestedAvatar;
+        for (size_t a = 0; a < g_availableAvatars.size(); ++a) {
+            std::string lowerKey = g_availableAvatars[a].first;
+            std::string lowerReq = requestedAvatar;
+            for (char& c : lowerReq) c = tolower(c);
+            if (lowerKey.find(lowerReq) != std::string::npos) {
+                targetPath = g_availableAvatars[a].second;
+                g_currentAvatarIndex = static_cast<int>(a);
+                break;
+            }
+        }
+        SetPlayerAvatar(targetPath, engine, character, avatarEntity, editor);
+    }
+
     editor.selectedIndex = static_cast<int>(editor.entities.size() - 1);
 
     // 5. Initialize Camera Controllers
@@ -391,6 +481,15 @@ int main(int argc, char* argv[]) {
                             case SDLK_z: playCamera.targetDistance = std::max(playCamera.minDistance, playCamera.targetDistance - 0.35f); break;
                             case SDLK_x: playCamera.targetDistance = std::min(playCamera.maxDistance, playCamera.targetDistance + 0.35f); break;
                             case SDLK_p: animPaused = !animPaused; break;
+                            case SDLK_v: {
+                                if (mod & KMOD_SHIFT) {
+                                    g_currentAvatarIndex = (g_currentAvatarIndex - 1 + g_availableAvatars.size()) % g_availableAvatars.size();
+                                } else {
+                                    g_currentAvatarIndex = (g_currentAvatarIndex + 1) % g_availableAvatars.size();
+                                }
+                                SetPlayerAvatar(g_availableAvatars[g_currentAvatarIndex].second, engine, character, avatarEntity, editor);
+                                break;
+                            }
                             case SDLK_r:
                                 charPos = Surreal::Vec3(0, 0, 0);
                                 charVel = Surreal::Vec3(0, 0, 0);
@@ -404,29 +503,53 @@ int main(int argc, char* argv[]) {
                     // --- WORLD EDITOR MODE CONTROLS ---
                     else {
                         if (editor.showModelCatalog) {
-                            int slot = 0;
-                            if (sym >= SDLK_1 && sym <= SDLK_8) slot = sym - SDLK_0;
-                            else if (sym >= SDLK_KP_1 && sym <= SDLK_KP_8) slot = sym - SDLK_KP_1 + 1;
-                            else if (sym == SDLK_9 || sym == SDLK_KP_9) slot = 9;
-                            else if (sym == SDLK_0 || sym == SDLK_KP_0) slot = 10;
-                            else if (sym == SDLK_m) slot = 11;
-
-                            if (slot > 0) {
-                                if (editor.PickCatalogEntry(slot, character.activeDeformedMesh)) {
-                                    editor.placementPos = editor.flyCamPos + editor.GetFlyForward() * 3.5f;
-                                    editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
+                            if (mod & KMOD_SHIFT) {
+                                int slot = 0;
+                                if (sym >= SDLK_1 && sym <= SDLK_8) slot = sym - SDLK_0;
+                                else if (sym >= SDLK_KP_1 && sym <= SDLK_KP_8) slot = sym - SDLK_KP_1 + 1;
+                                if (slot > 0) {
+                                    int idx = editor.catalogPage * Surreal::SurrealEditor::ITEMS_PER_PAGE + (slot - 1);
+                                    if (idx >= 0 && idx < (int)editor.activeCatalogList.size()) {
+                                        std::string p = editor.activeCatalogList[idx].fullPath;
+                                        if (p.find(".glb") != std::string::npos || p.find(".gltf") != std::string::npos) {
+                                            SetPlayerAvatar(p, engine, character, avatarEntity, editor);
+                                        } else {
+                                            editor.SetStatus("[-] Cannot set static .obj mesh as player avatar", 3.0f);
+                                        }
+                                    }
                                 }
-                            } else if (sym == SDLK_PERIOD || sym == SDLK_PAGEDOWN || sym == SDLK_RIGHT) {
-                                editor.CatalogNextPage();
-                            } else if (sym == SDLK_COMMA || sym == SDLK_PAGEUP || sym == SDLK_LEFT) {
-                                editor.CatalogPrevPage();
-                            } else if (sym == SDLK_TAB) {
-                                editor.CycleModelFolder();
-                            } else if (sym == SDLK_F5) {
-                                editor.RefreshModelFolder();
-                                editor.SetStatus("[✓] Rescanned 3D Model Folder: " + std::to_string(editor.folderModels.size()) + " files found");
-                            } else if (sym == SDLK_ESCAPE) {
-                                editor.showModelCatalog = false;
+                            } else {
+                                int slot = 0;
+                                if (sym >= SDLK_1 && sym <= SDLK_8) slot = sym - SDLK_0;
+                                else if (sym >= SDLK_KP_1 && sym <= SDLK_KP_8) slot = sym - SDLK_KP_1 + 1;
+                                else if (sym == SDLK_9 || sym == SDLK_KP_9) slot = 9;
+                                else if (sym == SDLK_0 || sym == SDLK_KP_0) slot = 10;
+                                else if (sym == SDLK_m) slot = 11;
+
+                                if (slot > 0) {
+                                    if (editor.PickCatalogEntry(slot, character.activeDeformedMesh)) {
+                                        editor.placementPos = editor.flyCamPos + editor.GetFlyForward() * 3.5f;
+                                        editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
+                                    }
+                                } else if (sym == SDLK_PERIOD || sym == SDLK_PAGEDOWN || sym == SDLK_RIGHT) {
+                                    editor.CatalogNextPage();
+                                } else if (sym == SDLK_COMMA || sym == SDLK_PAGEUP || sym == SDLK_LEFT) {
+                                    editor.CatalogPrevPage();
+                                } else if (sym == SDLK_t) {
+                                    editor.CycleCategory();
+                                } else if (sym == SDLK_v) {
+                                    int idx = editor.catalogPage * Surreal::SurrealEditor::ITEMS_PER_PAGE;
+                                    if (idx >= 0 && idx < (int)editor.activeCatalogList.size()) {
+                                        SetPlayerAvatar(editor.activeCatalogList[idx].fullPath, engine, character, avatarEntity, editor);
+                                    }
+                                } else if (sym == SDLK_TAB) {
+                                    editor.CycleCategory();
+                                } else if (sym == SDLK_F5) {
+                                    editor.RefreshModelFolder();
+                                    editor.SetStatus("[✓] Rescanned 3D Model Folder: " + std::to_string(editor.folderModels.size()) + " files found");
+                                } else if (sym == SDLK_ESCAPE) {
+                                    editor.showModelCatalog = false;
+                                }
                             }
                         } else if (editor.isPlacingModel) {
                             switch (sym) {
@@ -764,6 +887,7 @@ int main(int argc, char* argv[]) {
         if (!animPaused || isBenchmarkRunning) {
             auto tSkinStart = std::chrono::high_resolution_clock::now();
             character.Update(dt);
+            editor.UpdateAnimations(dt);
             auto tSkinEnd = std::chrono::high_resolution_clock::now();
             lastSkinningMs = std::chrono::duration<float, std::milli>(tSkinEnd - tSkinStart).count();
         }
@@ -789,8 +913,8 @@ int main(int argc, char* argv[]) {
                 auto itTr = engine.world.transforms.find(entityID);
                 if (itMr == engine.world.meshRenderers.end() || itTr == engine.world.transforms.end()) continue;
 
-                bool isAvatar = (entityID == avatarEntity);
-                hybridRenderer.RenderMesh(itMr->second.mesh, itTr->second.GetWorldMatrix(), vpMat, itMr->second.material, isAvatar);
+                bool isDynamic = (entityID == avatarEntity) || (editor.animatedEntities.count(entityID) > 0);
+                hybridRenderer.RenderMesh(itMr->second.mesh, itTr->second.GetWorldMatrix(), vpMat, itMr->second.material, isDynamic);
             }
 
             // Draw Live 3D Placement Model Preview (GPU)

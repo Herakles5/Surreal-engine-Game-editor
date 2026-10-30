@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <iostream>
 #include <map>
+#include <filesystem>
 
 namespace Surreal {
 
@@ -163,6 +164,7 @@ public:
     bool isLooping;
     bool hasFootBaseOffset;
     float footBaseOffset;
+    bool isZUpModel;
 
     SkeletalMeshInstance()
         : activeDeformedMesh(std::make_shared<SurrealMesh>()),
@@ -171,7 +173,8 @@ public:
           playbackSpeed(1.0f),
           isLooping(true),
           hasFootBaseOffset(false),
-          footBaseOffset(0.0f) {}
+          footBaseOffset(0.0f),
+          isZUpModel(false) {}
 
     void PlayClip(int index, bool loop = true) {
         if (index >= 0 && index < (int)clips.size()) {
@@ -276,9 +279,21 @@ private:
             activeDeformedMesh->vertices.resize(vertCount);
         }
 
-        // Calibrate foot base offset once at initialization to prevent jitter & remove duplicate vertex loop
+        // Calibrate foot base offset once at initialization & auto-detect Z-up vs Y-up coordinate spaces
         if (!hasFootBaseOffset) {
-            float minZ = 1e9f;
+            float minZ = 1e9f, maxZ = -1e9f;
+            float minY = 1e9f, maxY = -1e9f;
+
+            for (size_t i = 0; i < vertCount; ++i) {
+                const SkinnedVertex3D& b = bindVertices[i];
+                minZ = std::min(minZ, b.position.z); maxZ = std::max(maxZ, b.position.z);
+                minY = std::min(minY, b.position.y); maxY = std::max(maxY, b.position.y);
+            }
+
+            // If depth Z extent is significantly larger than height Y, model was exported in Blender Z-up space (e.g. Mia)
+            isZUpModel = ((maxZ - minZ) > (maxY - minY) * 1.25f);
+
+            float minGround = 1e9f;
             for (size_t i = 0; i < vertCount; ++i) {
                 const SkinnedVertex3D& b = bindVertices[i];
                 Vec3 skinnedPos(0, 0, 0);
@@ -289,13 +304,15 @@ private:
                         skinnedPos = skinnedPos + (skinM.TransformPoint(b.position) * weight);
                     }
                 }
-                if (skinnedPos.z < minZ) minZ = skinnedPos.z;
+                float groundAxis = isZUpModel ? skinnedPos.z : skinnedPos.y;
+                if (groundAxis < minGround) minGround = groundAxis;
             }
-            footBaseOffset = minZ;
+            footBaseOffset = minGround;
             hasFootBaseOffset = true;
         }
 
-        const float minZ = footBaseOffset;
+        const float footOffset = footBaseOffset;
+        const bool zUp = isZUpModel;
         const size_t numJoints = joints.size();
 
         // Multi-threaded Linear Blend Skinning (LBS) via OpenMP
@@ -317,14 +334,28 @@ private:
                 }
             }
 
-            // Apply Z-up to Y-up rotation and align feet to Y=0
-            float rx = skinnedPos.x;
-            float ry = skinnedPos.z - minZ;
-            float rz = -skinnedPos.y;
+            float rx, ry, rz;
+            float rnx, rny, rnz;
 
-            float rnx = skinnedNorm.x;
-            float rny = skinnedNorm.z;
-            float rnz = -skinnedNorm.y;
+            if (zUp) {
+                // Blender Z-up to standard Y-up conversion (e.g. Mia)
+                rx = skinnedPos.x;
+                ry = skinnedPos.z - footOffset;
+                rz = -skinnedPos.y;
+
+                rnx = skinnedNorm.x;
+                rny = skinnedNorm.z;
+                rnz = -skinnedNorm.y;
+            } else {
+                // Standard glTF Y-up coordinates (e.g. Wednesday, Miku, Stormtrooper, Dancers)
+                rx = skinnedPos.x;
+                ry = skinnedPos.y - footOffset;
+                rz = skinnedPos.z;
+
+                rnx = skinnedNorm.x;
+                rny = skinnedNorm.y;
+                rnz = skinnedNorm.z;
+            }
 
             activeDeformedMesh->vertices[i].position = Vec3(rx, ry, rz);
             activeDeformedMesh->vertices[i].normal = Vec3(rnx, rny, rnz).Normalized();
@@ -347,14 +378,21 @@ public:
         const std::string& filepath,
         SkeletalMeshInstance& outInstance)
     {
+        std::error_code ec;
+        std::string resolvedPath = filepath;
+        if (std::filesystem::is_symlink(filepath, ec)) {
+            auto can = std::filesystem::canonical(filepath, ec);
+            if (!ec) resolvedPath = can.string();
+        }
+
         cgltf_options options;
         memset(&options, 0, sizeof(cgltf_options));
 
         cgltf_data* data = nullptr;
-        cgltf_result result = cgltf_parse_file(&options, filepath.c_str(), &data);
+        cgltf_result result = cgltf_parse_file(&options, resolvedPath.c_str(), &data);
         if (result != cgltf_result_success) return false;
 
-        result = cgltf_load_buffers(&options, data, filepath.c_str());
+        result = cgltf_load_buffers(&options, data, resolvedPath.c_str());
         if (result != cgltf_result_success) {
             cgltf_free(data);
             return false;
@@ -483,8 +521,8 @@ public:
         }
 
         // 3. Texture Cache & Loader (storing RGBA buffer in SubMesh)
-        size_t lastSlash = filepath.find_last_of("/\\");
-        std::string baseDir = (lastSlash != std::string::npos) ? filepath.substr(0, lastSlash) : ".";
+        size_t lastSlash = resolvedPath.find_last_of("/\\");
+        std::string baseDir = (lastSlash != std::string::npos) ? resolvedPath.substr(0, lastSlash) : ".";
 
         struct RawTex {
             int w = 0, h = 0;
@@ -787,6 +825,9 @@ public:
             outInstance.activeDeformedMesh->vertices[i] = Vertex3D(b.position, b.normal, b.u, b.v, b.color);
         }
         outInstance.activeDeformedMesh->BuildClusters();
+
+        // Run initial skeletal skinning pass to deform mesh to bind/frame 0 upright pose
+        outInstance.Update(0.0f);
 
         cgltf_free(data);
         return true;
