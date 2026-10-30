@@ -20,9 +20,12 @@
 
 int main(int argc, char* argv[]) {
     bool headless = false;
+    bool startInEditor = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--benchmark-headless") {
             headless = true;
+        } else if (std::string(argv[i]) == "--editor") {
+            startInEditor = true;
         }
     }
 
@@ -184,6 +187,10 @@ int main(int argc, char* argv[]) {
     playCamera.yaw = 0.0f;
     playCamera.SetTarget(Surreal::Vec3(0, 1.25f, 0));
 
+    if (startInEditor) {
+        editor.ToggleMode(playCamera.GetPosition(), playCamera.pitch, playCamera.yaw);
+    }
+
     // Setup Atmospheric PBR Lighting
     engine.world.sunLight.direction = Surreal::Vec3(0.55f, 0.75f, 0.45f).Normalized();
     engine.world.sunLight.color = Surreal::ColorRGB(1.0f, 0.98f, 0.94f);
@@ -256,7 +263,12 @@ int main(int argc, char* argv[]) {
                     uint16_t mod = ev.key.keysym.mod;
 
                     if (sym == SDLK_ESCAPE) {
-                        if (editor.showModelCatalog) {
+                        if (benchResults.isCompleted) {
+                            benchResults.isCompleted = false;
+                        } else if (isBenchmarkRunning) {
+                            isBenchmarkRunning = false;
+                            editor.SetStatus("[!] Benchmark cancelled.", 2.5f);
+                        } else if (editor.showModelCatalog) {
                             editor.showModelCatalog = false;
                             editor.SetStatus("[!] Model catalog closed.");
                         } else if (editor.isPlacingModel) {
@@ -265,6 +277,19 @@ int main(int argc, char* argv[]) {
                             editor.ToggleMode(playCamera.GetPosition(), playCamera.pitch, playCamera.yaw);
                         } else {
                             running = false;
+                        }
+                    } else if (sym == SDLK_b) {
+                        if (!isBenchmarkRunning) {
+                            isBenchmarkRunning = true;
+                            benchmarkFrameCount = 0;
+                            benchFpsList.clear();
+                            benchSkinTimes.clear();
+                            benchRenderTimes.clear();
+                            benchResults.isCompleted = false;
+                            editor.SetStatus("[*] Benchmark Stress Test started (100 Frames)...", 3.0f);
+                        } else {
+                            isBenchmarkRunning = false;
+                            editor.SetStatus("[!] Benchmark cancelled.", 2.0f);
                         }
                     } else if (sym == SDLK_TAB) {
                         editor.ToggleMode(playCamera.GetPosition(), playCamera.pitch, playCamera.yaw);
@@ -478,6 +503,9 @@ int main(int argc, char* argv[]) {
                         case SDLK_d: keyRight = false; break;
                     }
                 } else if (ev.type == SDL_MOUSEBUTTONDOWN) {
+                    if (benchResults.isCompleted) {
+                        benchResults.isCompleted = false;
+                    }
                     if (editor.mode == Surreal::EditorMode::EDIT_MODE) {
                         if (editor.showModelCatalog && ev.button.button == SDL_BUTTON_LEFT) {
                             int maxItems = std::min(5, static_cast<int>(editor.folderModels.size()));
@@ -710,6 +738,7 @@ int main(int argc, char* argv[]) {
             // Draw HUD into transparent buffer
             std::fill(hudFramebuffer.begin(), hudFramebuffer.end(), 0x00000000);
             std::string clipName = character.clips.empty() ? "None" : character.clips[0].name;
+            int benchProgress = isBenchmarkRunning ? ((benchmarkFrameCount * 100) / TOTAL_BENCHMARK_FRAMES) : 0;
 
             if (editor.mode == Surreal::EditorMode::PLAY_MODE) {
                 Surreal::SurrealHUD::RenderHUD(
@@ -719,7 +748,7 @@ int main(int argc, char* argv[]) {
                     character.bindVertices.size(), character.activeDeformedMesh->indices.size() / 3,
                     clipName, character.currentTime,
                     playCamera.distance, playCamera.pitch, playCamera.yaw,
-                    isBenchmarkRunning, 0,
+                    isBenchmarkRunning, benchProgress,
                     benchResults.isCompleted ? &benchResults : nullptr
                 );
             }
@@ -745,6 +774,7 @@ int main(int argc, char* argv[]) {
             }
 
             std::string clipName = character.clips.empty() ? "None" : character.clips[0].name;
+            int benchProgress = isBenchmarkRunning ? ((benchmarkFrameCount * 100) / TOTAL_BENCHMARK_FRAMES) : 0;
             if (editor.mode == Surreal::EditorMode::PLAY_MODE) {
                 Surreal::SurrealHUD::RenderHUD(
                     framebuffer.data(), WIN_WIDTH, WIN_HEIGHT,
@@ -753,7 +783,7 @@ int main(int argc, char* argv[]) {
                     character.bindVertices.size(), character.activeDeformedMesh->indices.size() / 3,
                     clipName, character.currentTime,
                     playCamera.distance, playCamera.pitch, playCamera.yaw,
-                    isBenchmarkRunning, 0,
+                    isBenchmarkRunning, benchProgress,
                     benchResults.isCompleted ? &benchResults : nullptr
                 );
             }
@@ -769,6 +799,53 @@ int main(int argc, char* argv[]) {
         auto tRenderEnd = std::chrono::high_resolution_clock::now();
         float renderMs = std::chrono::duration<float, std::milli>(tRenderEnd - tRenderStart).count();
         engine.lastFrameTimeMs = renderMs;
+
+        // --- BENCHMARK DATA SAMPLING & COMPUTATION ---
+        if (isBenchmarkRunning) {
+            benchmarkFrameCount++;
+            float totalFrameMs = engine.lastFrameTimeMs + lastSkinningMs;
+            float instFps = (totalFrameMs > 0.001f) ? (1000.0f / totalFrameMs) : 60.0f;
+            benchFpsList.push_back(instFps);
+            benchSkinTimes.push_back(lastSkinningMs);
+            benchRenderTimes.push_back(engine.lastFrameTimeMs);
+
+            // Orbit camera smoothly during benchmark test
+            playCamera.yaw += 0.035f;
+
+            if (benchmarkFrameCount >= TOTAL_BENCHMARK_FRAMES) {
+                benchResults.isCompleted = true;
+                benchResults.totalFrames = TOTAL_BENCHMARK_FRAMES;
+
+                float minF = 1e9f, maxF = 0.0f, sumF = 0.0f;
+                for (float f : benchFpsList) {
+                    if (f < minF) minF = f;
+                    if (f > maxF) maxF = f;
+                    sumF += f;
+                }
+                benchResults.minFps = minF;
+                benchResults.maxFps = maxF;
+                benchResults.avgFps = sumF / benchFpsList.size();
+
+                float sumSkin = 0.0f;
+                for (float s : benchSkinTimes) sumSkin += s;
+                benchResults.avgSkinningMs = sumSkin / benchSkinTimes.size();
+
+                float sumRender = 0.0f;
+                for (float r : benchRenderTimes) sumRender += r;
+                benchResults.avgRenderMs = sumRender / benchRenderTimes.size();
+                benchResults.avgFrameTimeMs = benchResults.avgSkinningMs + benchResults.avgRenderMs;
+
+                uint64_t totalMeshlets = engine.renderedMeshlets + engine.culledMeshlets;
+                benchResults.meshletCullingEfficiency = (totalMeshlets > 0) ?
+                    (static_cast<float>(engine.culledMeshlets) / totalMeshlets * 100.0f) : 0.0f;
+
+                benchResults.totalVertices = character.bindVertices.size();
+                benchResults.totalTriangles = character.activeDeformedMesh->indices.size() / 3;
+
+                isBenchmarkRunning = false;
+                editor.SetStatus("[✓] Benchmark Complete! Scorecard displayed.", 6.0f);
+            }
+        }
 
         // Rolling FPS
         frameCounter++;

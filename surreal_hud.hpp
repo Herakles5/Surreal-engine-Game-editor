@@ -282,21 +282,25 @@ public:
         DrawString(fb, screenW, screenH, panelX + 12, panelY + 186, "[L-DRAG] Free Cam | [WHEEL/Z/X] Zoom (1.2-6m)", 0xFF8899AA, 1);
         DrawString(fb, screenW, screenH, panelX + 12, panelY + 200, "[B] Benchmark | [V/R] Reset Cam | [P] Pause", 0xFF8899AA, 1);
 
-        // 2. Active Benchmark Progress Banner
+        // 2. Active Benchmark Progress Banner (Positioned cleanly below top bar)
         if (isBenchmarkRunning) {
-            DrawPanel(fb, screenW, screenH, screenW / 2 - 180, 20, 360, 60, 0x1A0822, 0.95f);
+            int bw = 420;
+            int bh = 64;
+            int bx = (screenW - bw) / 2;
+            int by = 60; // Cleanly under the top status bar (y: 0-40)
+            DrawPanel(fb, screenW, screenH, bx, by, bw, bh, 0x1A0822, 0.95f);
             std::snprintf(buf, sizeof(buf), "BENCHMARK STRESS TEST RUNNING... %d%%", benchmarkProgressPercent);
-            DrawString(fb, screenW, screenH, screenW / 2 - 160, 32, buf, 0xFFFF007F, 1);
-            DrawProgressBar(fb, screenW, screenH, screenW / 2 - 160, 52, 320, 12,
+            DrawString(fb, screenW, screenH, bx + 20, by + 14, buf, 0xFFFF007F, 1);
+            DrawProgressBar(fb, screenW, screenH, bx + 20, by + 36, bw - 40, 14,
                             benchmarkProgressPercent / 100.0f, 0xFF00FFCC, 0xFF223344);
         }
 
         // 3. Completed Benchmark Results Card (Center Overlay)
         if (benchResults && benchResults->isCompleted) {
-            int bw = 460;
+            int bw = 480;
             int bh = 250;
             int bx = (screenW - bw) / 2;
-            int by = (screenH - bh) / 2;
+            int by = (screenH - bh) / 2 + 20;
 
             DrawPanel(fb, screenW, screenH, bx, by, bw, bh, 0x050812, 0.96f);
 
@@ -324,7 +328,7 @@ public:
             std::snprintf(buf, sizeof(buf), "Engine Rating:      SOVEREIGN BARE-METAL GRADE (AAA HYBRID)");
             DrawString(fb, screenW, screenH, bx + 20, by + 172, buf, 0xFF00FFCC, 1);
 
-            DrawString(fb, screenW, screenH, bx + 20, by + 204, "Press [B] to run again  |  Click anywhere to dismiss", 0xFF8899AA, 1);
+            DrawString(fb, screenW, screenH, bx + 20, by + 204, "Press [B] to run again  |  Click / [ESC] to dismiss", 0xFF8899AA, 1);
         }
     }
 };
