@@ -103,7 +103,7 @@ public:
     std::vector<PointLight> pointLights;
     ColorRGB ambientLight;
 
-    SurrealWorld() : nextEntityId(1), ambientLight(0.08f, 0.08f, 0.12f) {
+    SurrealWorld() : ambientLight(0.08f, 0.08f, 0.12f), nextEntityId(1) {
         sunLight.direction = Vec3(0.577f, 0.577f, 0.577f).Normalized();
         sunLight.color = ColorRGB(1.0f, 0.98f, 0.92f);
         sunLight.intensity = 1.0f;

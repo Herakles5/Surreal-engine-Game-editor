@@ -3,8 +3,8 @@
 # ==============================================================================
 
 CXX ?= g++
-CXXFLAGS ?= -O3 -mavx2 -mfma -pthread -std=c++17 -Wall -Wextra -Wno-unused-parameter
-LDFLAGS ?= -lGL -lSDL2 -ldl -lm
+CXXFLAGS ?= -O3 -mavx2 -mfma -fopenmp -pthread -std=c++17 -Wall -Wextra -Wno-unused-parameter
+LDFLAGS ?= -lGL -lSDL2 -ldl -lm -fopenmp
 
 TARGET_STUDIO = surreal-editor
 TARGET_BENCH = surreal-bench
@@ -32,3 +32,4 @@ clean:
 	rm -f $(TARGET_STUDIO) $(TARGET_BENCH) *.o
 
 .PHONY: all clean install
+

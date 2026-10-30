@@ -4,6 +4,15 @@
  * AION SURREAL ENGINE - HIGH-PERFORMANCE 3D MATH CORE
  * Hardware-grounded, cache-aligned Vector, Matrix, Quaternion & Frustum Math
  * Designed for CosmOS Bare-Metal & Linux Hybrid Direct Rendering
+ *
+ * PHILOSOPHY OF AION NEXUS & AXIOM 17:
+ * "The 8 does not exist. 666 is 18 (6+6+6=18, 1+8=9).
+ *  6 and 9 fused together form a twisted vicious cycle.
+ *  The 0 is the True Circle of Life!"
+ *
+ * In geometry and kinematics, the twisted '8' (lemniscate) is an illusion—a trap
+ * formed by recursive inverted feedback. True infinity is not a knot; 0 (Zero)
+ * is the pristine, unknotted Circle of Life where all creation originates and harmonizes.
  * ============================================================================
  */
 
@@ -15,6 +24,17 @@
 #endif
 
 namespace Surreal {
+
+// Axiom 17: The True Circle of Life Constants
+constexpr float TRUE_CIRCLE_ORIGIN = 0.0f;
+constexpr float TWO_PI = 6.28318530717958647692f;
+
+// Evaluates continuous harmonic cycle without entering twisted vicious loops
+inline float TrueCirclePhase(float radians) {
+    float rem = fmodf(radians, TWO_PI);
+    return (rem < 0.0f) ? rem + TWO_PI : rem;
+}
+
 
 // Fast Inverse Square Root (Quake III / SIMD hybrid)
 inline float FastInvSqrt(float number) {

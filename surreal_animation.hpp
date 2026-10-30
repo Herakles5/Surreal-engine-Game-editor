@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <iostream>
 
 namespace Surreal {
 
@@ -159,13 +160,17 @@ public:
     float currentTime;
     float playbackSpeed;
     bool isLooping;
+    bool hasFootBaseOffset;
+    float footBaseOffset;
 
     SkeletalMeshInstance()
         : activeDeformedMesh(std::make_shared<SurrealMesh>()),
           activeClipIndex(0),
           currentTime(0.0f),
           playbackSpeed(1.0f),
-          isLooping(true) {}
+          isLooping(true),
+          hasFootBaseOffset(false),
+          footBaseOffset(0.0f) {}
 
     void PlayClip(int index, bool loop = true) {
         if (index >= 0 && index < (int)clips.size()) {
@@ -265,30 +270,36 @@ private:
 
     void DeformMesh() {
         if (!activeDeformedMesh) return;
-        if (activeDeformedMesh->vertices.size() != bindVertices.size()) {
-            activeDeformedMesh->vertices.resize(bindVertices.size());
+        const size_t vertCount = bindVertices.size();
+        if (activeDeformedMesh->vertices.size() != vertCount) {
+            activeDeformedMesh->vertices.resize(vertCount);
         }
 
-        // Find min Z to align feet to Y=0
-        float minZ = 1e9f;
-        for (size_t i = 0; i < bindVertices.size(); ++i) {
-            const SkinnedVertex3D& b = bindVertices[i];
-            Vec3 skinnedPos(0, 0, 0);
-
-            for (int w = 0; w < 4; ++w) {
-                float weight = b.weights[w];
-                if (weight > 0.0001f) {
-                    uint16_t jIdx = b.joints[w];
-                    if (jIdx < joints.size()) {
-                        const Mat4& skinM = joints[jIdx].skinMatrix;
+        // Calibrate foot base offset once at initialization to prevent jitter & remove duplicate vertex loop
+        if (!hasFootBaseOffset) {
+            float minZ = 1e9f;
+            for (size_t i = 0; i < vertCount; ++i) {
+                const SkinnedVertex3D& b = bindVertices[i];
+                Vec3 skinnedPos(0, 0, 0);
+                for (int w = 0; w < 4; ++w) {
+                    float weight = b.weights[w];
+                    if (weight > 0.0001f && b.joints[w] < joints.size()) {
+                        const Mat4& skinM = joints[b.joints[w]].skinMatrix;
                         skinnedPos = skinnedPos + (skinM.TransformPoint(b.position) * weight);
                     }
                 }
+                if (skinnedPos.z < minZ) minZ = skinnedPos.z;
             }
-            if (skinnedPos.z < minZ) minZ = skinnedPos.z;
+            footBaseOffset = minZ;
+            hasFootBaseOffset = true;
         }
 
-        for (size_t i = 0; i < bindVertices.size(); ++i) {
+        const float minZ = footBaseOffset;
+        const size_t numJoints = joints.size();
+
+        // Multi-threaded Linear Blend Skinning (LBS) via OpenMP
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < (int)vertCount; ++i) {
             const SkinnedVertex3D& b = bindVertices[i];
             Vec3 skinnedPos(0, 0, 0);
             Vec3 skinnedNorm(0, 0, 0);
@@ -297,7 +308,7 @@ private:
                 float weight = b.weights[w];
                 if (weight > 0.0001f) {
                     uint16_t jIdx = b.joints[w];
-                    if (jIdx < joints.size()) {
+                    if (jIdx < numJoints) {
                         const Mat4& skinM = joints[jIdx].skinMatrix;
                         skinnedPos = skinnedPos + (skinM.TransformPoint(b.position) * weight);
                         skinnedNorm = skinnedNorm + (skinM.TransformDirection(b.normal) * weight);

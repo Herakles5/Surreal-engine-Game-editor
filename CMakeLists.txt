@@ -7,8 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(OpenGL REQUIRED)
 find_package(SDL2 REQUIRED)
 find_package(Threads REQUIRED)
+find_package(OpenMP REQUIRED)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2 -mfma -O3")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2 -mfma -O3 ${OpenMP_CXX_FLAGS}")
 
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -23,6 +24,7 @@ target_link_libraries(surreal-editor
     ${OPENGL_LIBRARIES}
     ${SDL2_LIBRARIES}
     Threads::Threads
+    OpenMP::OpenMP_CXX
     ${CMAKE_DL_LIBS}
     m
 )
@@ -34,6 +36,7 @@ target_link_libraries(surreal-bench
     ${OPENGL_LIBRARIES}
     ${SDL2_LIBRARIES}
     Threads::Threads
+    OpenMP::OpenMP_CXX
     m
 )
 
@@ -57,3 +60,4 @@ install(FILES
     stb_image.h
     DESTINATION include/surreal
 )
+

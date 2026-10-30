@@ -406,9 +406,31 @@ void main() {
     float NdotL = max(dot(N, L), 0.0);
     vec3 directLight = (kD * albedo / PI + specular) * uSunColor * NdotL;
     vec3 ambient = uAmbientColor * albedo;
-    vec3 color = ambient + directLight;
 
-    color = color / (color + vec3(1.0));
+    // 1. Floor Ambient Bounce (prevents pitch-black under-surfaces)
+    float groundBounce = max(-N.y * 0.5 + 0.5, 0.0);
+    vec3 bounceLight = vec3(0.08, 0.07, 0.12) * groundBounce * albedo;
+
+    // 2. Fresnel Rim Lighting (vibrant cyberpunk silhouette glow on character & geometry edges)
+    float NdotV = max(dot(N, V), 0.0);
+    float rimFactor = pow(clamp(1.0 - NdotV, 0.0, 1.0), 3.2);
+    vec3 rimLight = vec3(0.35, 0.65, 1.0) * rimFactor * 0.45;
+
+    vec3 color = ambient + directLight + bounceLight + rimLight;
+
+    // 3. Atmospheric Distance Depth Fog
+    float dist = length(uCamPos - vFragPos);
+    float fogFactor = clamp((dist - 8.0) / 45.0, 0.0, 1.0);
+    fogFactor = smoothstep(0.0, 1.0, fogFactor);
+    vec3 fogColor = vec3(0.03, 0.04, 0.09); // Deep cosmic twilight haze
+    color = mix(color, fogColor, fogFactor);
+
+    // 4. ACES Filmic Tone Mapping (professional cinematic contrast)
+    vec3 a = color * (2.51 * color + vec3(0.03));
+    vec3 b = color * (2.43 * color + vec3(0.59)) + vec3(0.14);
+    color = clamp(a / b, 0.0, 1.0);
+
+    // Gamma Correction (sRGB standard)
     color = pow(color, vec3(1.0 / 2.2));
 
     FragColor = vec4(color, vColor.a);

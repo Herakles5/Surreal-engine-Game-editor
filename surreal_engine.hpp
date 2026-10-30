@@ -75,11 +75,33 @@ public:
     }
 
     void Clear(uint32_t clearColor = 0xFF050811) {
-        if (!framebuffer) return;
-        uint32_t totalPixels = screenWidth * screenHeight;
-        for (uint32_t i = 0; i < totalPixels; ++i) {
-            framebuffer[i] = clearColor;
-            depthBuffer[i] = 100000.0f; // Far Z-plane
+        if (!framebuffer || !depthBuffer) return;
+        #pragma omp parallel for schedule(static)
+        for (uint32_t y = 0; y < screenHeight; ++y) {
+            float t = static_cast<float>(y) / static_cast<float>(screenHeight);
+            // Cosmic dusk gradient: deep starry zenith -> glowing horizon -> dark floor
+            float r, g, b;
+            if (t < 0.50f) {
+                float k = t / 0.50f;
+                r = 0.02f + k * 0.08f;
+                g = 0.03f + k * 0.04f;
+                b = 0.07f + k * 0.12f;
+            } else {
+                float k = (t - 0.50f) / 0.50f;
+                r = 0.10f * (1.0f - k * 0.75f);
+                g = 0.07f * (1.0f - k * 0.55f);
+                b = 0.19f * (1.0f - k * 0.65f);
+            }
+            uint32_t cr = static_cast<uint32_t>(r * 255.0f);
+            uint32_t cg = static_cast<uint32_t>(g * 255.0f);
+            uint32_t cb = static_cast<uint32_t>(b * 255.0f);
+            uint32_t skyPix = 0xFF000000 | (cr << 16) | (cg << 8) | cb;
+
+            uint32_t rowStart = y * screenWidth;
+            for (uint32_t x = 0; x < screenWidth; ++x) {
+                framebuffer[rowStart + x] = skyPix;
+                depthBuffer[rowStart + x] = 100000.0f;
+            }
         }
     }
 
@@ -326,24 +348,51 @@ private:
                 world.sunLight.direction, world.sunLight.color * world.sunLight.intensity,
                 triMat
             );
-            uint32_t finalPixel = shadedColor.ToRGBA8();
 
-            // Scanline / Barycentric rasterization
+            // Subtle floor ambient bounce and distance depth fog
+            float groundBounce = std::max(-triNormal.y * 0.5f + 0.5f, 0.0f);
+            shadedColor = shadedColor + ColorRGB(0.08f, 0.07f, 0.12f) * (groundBounce * 0.6f) * triMat.albedo;
+
+            float triDist = (triCenter - cameraPos).Length();
+            float fogFactor = std::clamp((triDist - 8.0f) / 38.0f, 0.0f, 1.0f);
+            ColorRGB fogCol(0.03f, 0.04f, 0.09f);
+            ColorRGB finalShaded = shadedColor * (1.0f - fogFactor) + fogCol * fogFactor;
+            uint32_t finalPixel = finalShaded.ToRGBA8();
+
+            // High-Speed Incremental Barycentric Rasterization
+            float dx0 = -(sy2 - sy1) * invArea;
+            float dy0 =  (sx2 - sx1) * invArea;
+            float dx1 = -(sy0 - sy2) * invArea;
+            float dy1 =  (sx0 - sx2) * invArea;
+            float dx2 = -(sy1 - sy0) * invArea;
+            float dy2 =  (sx1 - sx0) * invArea;
+
+            float row_w0 = ((sx2 - sx1) * (minY - sy1) - (sy2 - sy1) * (minX - sx1)) * invArea;
+            float row_w1 = ((sx0 - sx2) * (minY - sy2) - (sy0 - sy2) * (minX - sx2)) * invArea;
+            float row_w2 = ((sx1 - sx0) * (minY - sy0) - (sy1 - sy0) * (minX - sx0)) * invArea;
+
             for (int y = minY; y <= maxY; ++y) {
-                for (int x = minX; x <= maxX; ++x) {
-                    float w0_edge = ((sx2 - sx1) * (y - sy1) - (sy2 - sy1) * (x - sx1)) * invArea;
-                    float w1_edge = ((sx0 - sx2) * (y - sy2) - (sy0 - sy2) * (x - sx2)) * invArea;
-                    float w2_edge = ((sx1 - sx0) * (y - sy0) - (sy1 - sy0) * (x - sx0)) * invArea;
+                float w0 = row_w0;
+                float w1 = row_w1;
+                float w2 = row_w2;
+                uint32_t rowOffset = y * screenWidth;
 
-                    if (w0_edge >= 0 && w1_edge >= 0 && w2_edge >= 0) {
-                        float z = w0_edge * p0.z + w1_edge * p1.z + w2_edge * p2.z;
-                        uint32_t pIdx = y * screenWidth + x;
+                for (int x = minX; x <= maxX; ++x) {
+                    if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
+                        float z = w0 * p0.z + w1 * p1.z + w2 * p2.z;
+                        uint32_t pIdx = rowOffset + x;
                         if (z < depthBuffer[pIdx]) {
                             depthBuffer[pIdx] = z;
                             framebuffer[pIdx] = finalPixel;
                         }
                     }
+                    w0 += dx0;
+                    w1 += dx1;
+                    w2 += dx2;
                 }
+                row_w0 += dy0;
+                row_w1 += dy1;
+                row_w2 += dy2;
             }
         }
     }
