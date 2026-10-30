@@ -486,11 +486,11 @@ void main() {
 
     vec3 color = ambient + directLight + bounceLight + rimLight;
 
-    // 3. Atmospheric Distance Depth Fog
+    // 3. Atmospheric Distance Depth Fog (Extended range for expansive metropolis view)
     float dist = length(uCamPos - vFragPos);
-    float fogFactor = clamp((dist - 8.0) / 45.0, 0.0, 1.0);
+    float fogFactor = clamp((dist - 25.0) / 160.0, 0.0, 1.0);
     fogFactor = smoothstep(0.0, 1.0, fogFactor);
-    vec3 fogColor = vec3(0.03, 0.04, 0.09); // Deep cosmic twilight haze
+    vec3 fogColor = uAmbientColor * 0.55 + vec3(0.015, 0.02, 0.04);
     color = mix(color, fogColor, fogFactor);
 
     // 4. ACES Filmic Tone Mapping (professional cinematic contrast)

@@ -358,6 +358,29 @@ public:
             return nullptr;
         }
 
+        // ---- 8. Smooth Phong Normals (Area-Weighted Normal Accumulation) ----
+        // Eliminates polygon faceting across front, back, and silhouette curves
+        std::vector<Vec3> accumNormals(mesh->vertices.size(), Vec3(0, 0, 0));
+        for (size_t t = 0; t + 2 < mesh->indices.size(); t += 3) {
+            uint32_t i0 = mesh->indices[t + 0];
+            uint32_t i1 = mesh->indices[t + 1];
+            uint32_t i2 = mesh->indices[t + 2];
+            const Vec3& p0 = mesh->vertices[i0].position;
+            const Vec3& p1 = mesh->vertices[i1].position;
+            const Vec3& p2 = mesh->vertices[i2].position;
+            Vec3 edge1 = p1 - p0;
+            Vec3 edge2 = p2 - p0;
+            Vec3 fn = edge1.Cross(edge2);
+            accumNormals[i0] = accumNormals[i0] + fn;
+            accumNormals[i1] = accumNormals[i1] + fn;
+            accumNormals[i2] = accumNormals[i2] + fn;
+        }
+        for (size_t v = 0; v < mesh->vertices.size(); ++v) {
+            if (accumNormals[v].LengthSq() > 1e-6f) {
+                mesh->vertices[v].normal = accumNormals[v].Normalized();
+            }
+        }
+
         mesh->CalculateBounds();
         mesh->BuildClusters();
         return mesh;

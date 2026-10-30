@@ -163,19 +163,21 @@ int main(int argc, char* argv[]) {
     // 2. Build 3D Terrain & Obstacle Parkour Environment
     std::cout << "[*] Constructing 3D Cyberpunk Grid Terrain & Parkour Platforms...\n";
 
-    // 2a. Ground Grid Floor (24m x 24m)
-    Surreal::EntityID floorEntity = engine.world.CreateEntity("CyberGridFloor");
+    // 2a. Massive Metropolis Ground Floor (180m x 180m = 32,400 m² total surface area)
+    Surreal::EntityID floorEntity = engine.world.CreateEntity("MetropolisGroundFloor");
     Surreal::TransformComponent& ft = engine.world.transforms[floorEntity];
-    if (loadCity) {
-        ft.position = Surreal::Vec3(0, -20.0f, 0); // Place far below street level so asphalt renders cleanly
-    }
+    ft.position = Surreal::Vec3(0, -0.015f, 0); // Foundation level seamlessly beneath street asphalt
+    ft.scale = Surreal::Vec3(1.0f, 1.0f, 1.0f);
 
     Surreal::MeshRendererComponent floorRenderer;
-    floorRenderer.mesh = Surreal::SurrealTerrainBuilder::CreateCyberGridFloor(24.0f, 24);
+    floorRenderer.mesh = Surreal::SurrealTerrainBuilder::CreateMetropolisGround(180.0f, 60);
     floorRenderer.material.albedo = Surreal::ColorRGB(1.0f, 1.0f, 1.0f);
-    floorRenderer.material.metallic = 0.20f;
-    floorRenderer.material.roughness = 0.55f;
+    floorRenderer.material.metallic = 0.15f;
+    floorRenderer.material.roughness = 0.65f;
     engine.world.meshRenderers[floorEntity] = floorRenderer;
+
+    // Soft Real-Time Planar Contact Shadow Disc Mesh
+    auto shadowDiscMesh = Surreal::SurrealTerrainBuilder::CreateShadowDisc(0.45f, 24);
 
     // 2b. Optional Obstacle Platforms (only when requested or in bare mode)
     std::vector<Surreal::ObstacleBox> obstacles;
@@ -245,12 +247,12 @@ int main(int argc, char* argv[]) {
     // Register entities in Editor Outliner
     Surreal::EditableEntity floorEd;
     floorEd.id = floorEntity;
-    floorEd.name = "CyberGridFloor";
+    floorEd.name = "MetropolisGroundFloor";
     floorEd.position = ft.position;
-    floorEd.scale = Surreal::Vec3(24.0f, 0.1f, 24.0f);
+    floorEd.scale = Surreal::Vec3(180.0f, 0.1f, 180.0f);
     floorEd.color = Surreal::ColorRGB(1.0f, 1.0f, 1.0f);
-    floorEd.metallic = 0.20f;
-    floorEd.roughness = 0.55f;
+    floorEd.metallic = 0.15f;
+    floorEd.roughness = 0.65f;
     floorEd.isStaticTerrain = true;
     editor.entities.push_back(floorEd);
 
@@ -275,7 +277,7 @@ int main(int argc, char* argv[]) {
         editor.entities.push_back(platEd);
     }
 
-    // Optional Seoul City 3D Environment (via --seoul / --city)
+    // Multi-District Seoul Metropolis Environment (Connected Multi-Block Boulevard)
     if (loadCity) {
         std::string cityPath = "assets/models/Seoul_City_PBR.glb";
         if (!std::filesystem::exists(cityPath)) {
@@ -286,29 +288,70 @@ int main(int argc, char* argv[]) {
         }
         Surreal::SkeletalMeshInstance cityInst;
         if (Surreal::SurrealSkeletalLoader::LoadSkeletalModel(cityPath, cityInst)) {
-            Surreal::EntityID cityEntity = engine.world.CreateEntity("Seoul_City");
-            Surreal::TransformComponent& ct = engine.world.transforms[cityEntity];
-            ct.position = Surreal::Vec3(0, 0, 0);
-            ct.scale = Surreal::Vec3(1.0f, 1.0f, 1.0f);
+            struct BlockDef {
+                const char* name;
+                Surreal::Vec3 pos;
+                float yaw;
+            };
+            // 6 connected city blocks forming a sprawling commercial boulevard with storefronts on both sides
+            const BlockDef cityBlocks[6] = {
+                {"Seoul_Downtown_Main",      Surreal::Vec3(0.0f, 0.0f, 0.0f),       0.0f},
+                {"Seoul_Avenue_South",      Surreal::Vec3(-9.3f, 0.0f, 9.8f),      (float)M_PI},
+                {"Seoul_East_District",     Surreal::Vec3(18.2f, 0.0f, 0.0f),      0.0f},
+                {"Seoul_West_District",     Surreal::Vec3(-18.2f, 0.0f, 0.0f),     0.0f},
+                {"Seoul_SouthEast_Arcade",  Surreal::Vec3(8.9f, 0.0f, 9.8f),       (float)M_PI},
+                {"Seoul_SouthWest_Arcade",  Surreal::Vec3(-27.5f, 0.0f, 9.8f),      (float)M_PI}
+            };
 
-            Surreal::MeshRendererComponent cmr;
-            cmr.mesh = cityInst.activeDeformedMesh;
-            cmr.material.albedo = Surreal::ColorRGB(1.0f, 1.0f, 1.0f);
-            cmr.material.metallic = 0.20f;
-            cmr.material.roughness = 0.50f;
-            engine.world.meshRenderers[cityEntity] = cmr;
+            for (const auto& blk : cityBlocks) {
+                Surreal::EntityID cityEntity = engine.world.CreateEntity(blk.name);
+                Surreal::TransformComponent& ct = engine.world.transforms[cityEntity];
+                ct.position = blk.pos;
+                ct.scale = Surreal::Vec3(1.0f, 1.0f, 1.0f);
+                ct.rotation = Surreal::Quat::FromAxisAngle(Surreal::Vec3(0, 1.0f, 0), blk.yaw);
 
-            Surreal::EditableEntity cityEd;
-            cityEd.id = cityEntity;
-            cityEd.name = "Seoul_City";
-            cityEd.position = ct.position;
-            cityEd.scale = ct.scale;
-            cityEd.color = cmr.material.albedo;
-            cityEd.metallic = cmr.material.metallic;
-            cityEd.roughness = cmr.material.roughness;
-            cityEd.isStaticTerrain = true;
-            editor.entities.push_back(cityEd);
-            std::cout << "[✓] Seoul City 3D Environment Spawned into Live Scene!\n";
+                Surreal::MeshRendererComponent cmr;
+                cmr.mesh = cityInst.activeDeformedMesh;
+                cmr.material.albedo = Surreal::ColorRGB(1.0f, 1.0f, 1.0f);
+                cmr.material.metallic = 0.20f;
+                cmr.material.roughness = 0.50f;
+                engine.world.meshRenderers[cityEntity] = cmr;
+
+                Surreal::EditableEntity cityEd;
+                cityEd.id = cityEntity;
+                cityEd.name = blk.name;
+                cityEd.position = ct.position;
+                cityEd.scale = ct.scale;
+                cityEd.color = cmr.material.albedo;
+                cityEd.metallic = cmr.material.metallic;
+                cityEd.roughness = cmr.material.roughness;
+                cityEd.isStaticTerrain = true;
+                editor.entities.push_back(cityEd);
+            }
+            std::cout << "[✓] Multi-District Seoul Metropolis (6 Connected Blocks) Spawned!\n";
+
+            // Perimeter Metropolis Skyline Towers
+            const struct TowerDef { const char* name; Surreal::Vec3 pos; Surreal::Vec3 size; Surreal::ColorRGB col; } towers[4] = {
+                {"CyberTower_NorthEast", Surreal::Vec3(55.0f, 12.0f, -40.0f), Surreal::Vec3(8.0f, 24.0f, 8.0f), Surreal::ColorRGB(0.12f, 0.45f, 0.65f)},
+                {"CyberTower_NorthWest", Surreal::Vec3(-55.0f, 15.0f, -40.0f), Surreal::Vec3(9.0f, 30.0f, 9.0f), Surreal::ColorRGB(0.65f, 0.15f, 0.45f)},
+                {"CyberTower_SouthEast", Surreal::Vec3(55.0f, 14.0f, 50.0f), Surreal::Vec3(8.5f, 28.0f, 8.5f), Surreal::ColorRGB(0.15f, 0.65f, 0.55f)},
+                {"CyberTower_SouthWest", Surreal::Vec3(-55.0f, 18.0f, 50.0f), Surreal::Vec3(10.0f, 36.0f, 10.0f), Surreal::ColorRGB(0.85f, 0.55f, 0.15f)}
+            };
+            for (const auto& tow : towers) {
+                Surreal::EntityID te = engine.world.CreateEntity(tow.name);
+                engine.world.transforms[te].position = tow.pos;
+                Surreal::MeshRendererComponent tmr;
+                tmr.mesh = Surreal::SurrealTerrainBuilder::CreateBox(tow.size, tow.col);
+                tmr.material.albedo = tow.col;
+                tmr.material.metallic = 0.65f;
+                tmr.material.roughness = 0.25f;
+                engine.world.meshRenderers[te] = tmr;
+
+                Surreal::EditableEntity ted;
+                ted.id = te; ted.name = tow.name; ted.position = tow.pos; ted.scale = tow.size;
+                ted.color = tow.col; ted.metallic = 0.65f; ted.roughness = 0.25f; ted.isStaticTerrain = true;
+                editor.entities.push_back(ted);
+            }
         }
     }
 
@@ -377,11 +420,36 @@ int main(int argc, char* argv[]) {
         editor.ToggleMode(playCamera.GetPosition(), playCamera.pitch, playCamera.yaw);
     }
 
-    // Setup Atmospheric PBR Lighting
-    engine.world.sunLight.direction = Surreal::Vec3(0.55f, 0.75f, 0.45f).Normalized();
-    engine.world.sunLight.color = Surreal::ColorRGB(1.0f, 0.98f, 0.94f);
-    engine.world.sunLight.intensity = 1.35f;
-    engine.world.ambientLight = Surreal::ColorRGB(0.32f, 0.32f, 0.38f);
+    // Setup Atmospheric PBR Lighting with 4 Time-of-Day Modes
+    struct AtmosphericProfile {
+        const char* name;
+        Surreal::Vec3 sunDir;
+        Surreal::ColorRGB sunColor;
+        float sunIntensity;
+        Surreal::ColorRGB ambientColor;
+        Surreal::ColorRGB skyColor;
+    };
+
+    const AtmosphericProfile skyProfiles[4] = {
+        // 0: DAY - Clear Seoul daylight
+        {"Tag (Daylight)", Surreal::Vec3(0.45f, 0.82f, 0.35f).Normalized(), Surreal::ColorRGB(1.0f, 0.98f, 0.92f), 1.35f, Surreal::ColorRGB(0.42f, 0.44f, 0.50f), Surreal::ColorRGB(0.50f, 0.68f, 0.88f)},
+        // 1: SUNSET - Golden hour & magenta horizon
+        {"Sonnenuntergang (Sunset)", Surreal::Vec3(0.85f, 0.22f, 0.45f).Normalized(), Surreal::ColorRGB(1.25f, 0.55f, 0.22f), 1.20f, Surreal::ColorRGB(0.36f, 0.24f, 0.34f), Surreal::ColorRGB(0.78f, 0.34f, 0.22f)},
+        // 2: CYBERPUNK NIGHT - Midnight neon street life
+        {"Cyberpunk Nacht (Night)", Surreal::Vec3(-0.35f, 0.85f, -0.40f).Normalized(), Surreal::ColorRGB(0.35f, 0.50f, 0.85f), 0.75f, Surreal::ColorRGB(0.18f, 0.18f, 0.28f), Surreal::ColorRGB(0.015f, 0.02f, 0.05f)},
+        // 3: NEON DAWN - Violet morning mist
+        {"Neon Morgendaemmerung (Dawn)", Surreal::Vec3(-0.6f, 0.45f, 0.65f).Normalized(), Surreal::ColorRGB(0.95f, 0.55f, 0.80f), 1.05f, Surreal::ColorRGB(0.28f, 0.25f, 0.40f), Surreal::ColorRGB(0.22f, 0.14f, 0.32f)}
+    };
+    int currentSkyProfile = 0; // Default to clear daylight, press [N] to toggle!
+
+    auto applySkyProfile = [&](int idx) {
+        const auto& p = skyProfiles[idx % 4];
+        engine.world.sunLight.direction = p.sunDir;
+        engine.world.sunLight.color = p.sunColor;
+        engine.world.sunLight.intensity = p.sunIntensity;
+        engine.world.ambientLight = p.ambientColor;
+    };
+    applySkyProfile(currentSkyProfile);
 
     // 6. Physics State
     Surreal::Vec3 charPos(0, 0, 0);
@@ -427,11 +495,13 @@ int main(int argc, char* argv[]) {
     std::cout << "    [K]          : Spawn New Platform (Edit Mode)\n";
     std::cout << "    [DEL]        : Delete Entity (Edit Mode)\n";
 
+    float totalAppTime = 0.0f;
     while (running) {
         auto currentTime = std::chrono::high_resolution_clock::now();
         float dt = std::chrono::duration<float>(currentTime - lastTime).count();
         lastTime = currentTime;
         dt = std::min(dt, 0.05f);
+        totalAppTime += dt;
 
         editor.Update(dt);
         aionLink.Update(dt, currentFps, engine.lastFrameTimeMs, editor.entities.size(),
@@ -491,6 +561,10 @@ int main(int argc, char* argv[]) {
                     } else if (sym == SDLK_F9) {
                         hybridRenderer.ToggleBackend();
                         editor.SetStatus("Switched Backend: " + hybridRenderer.GetBackendName(), 3.5f);
+                    } else if (sym == SDLK_n) {
+                        currentSkyProfile = (currentSkyProfile + 1) % 4;
+                        applySkyProfile(currentSkyProfile);
+                        editor.SetStatus(std::string("[N] Atmosphaere: ") + skyProfiles[currentSkyProfile].name, 3.5f);
                     } else if (sym == SDLK_F6) {
                         editor.SaveLevel("scene_level.json");
                     } else if (sym == SDLK_F7) {
@@ -505,8 +579,40 @@ int main(int argc, char* argv[]) {
                             case SDLK_s: keyBackward = true; break;
                             case SDLK_a: keyLeft = true; break;
                             case SDLK_d: keyRight = true; break;
+                            case SDLK_e: {
+                                // Interactive Dance Duet: find nearest dancer entity
+                                float nearestDist = 999.0f;
+                                std::string nearestName;
+                                std::string targetPath;
+                                for (const auto& ed : editor.entities) {
+                                    if (editor.animatedEntities.count(ed.id) > 0) {
+                                        float d = (ed.position - charPos).Length();
+                                        if (d < nearestDist && d < 3.2f) {
+                                            nearestDist = d;
+                                            nearestName = ed.name;
+                                            std::string lower = ed.name;
+                                            for (char& c : lower) c = tolower(c);
+                                            for (size_t a = 0; a < g_availableAvatars.size(); ++a) {
+                                                std::string key = g_availableAvatars[a].first;
+                                                if (lower.find(key) != std::string::npos) {
+                                                    targetPath = g_availableAvatars[a].second;
+                                                    g_currentAvatarIndex = static_cast<int>(a);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (!targetPath.empty()) {
+                                    SetPlayerAvatar(targetPath, engine, character, avatarEntity, editor);
+                                    editor.SetStatus("[★ DANCE DUET ★] Synchronisiere Tanz mit " + nearestName + "!", 4.0f);
+                                } else {
+                                    g_currentAvatarIndex = (g_currentAvatarIndex + 1) % g_availableAvatars.size();
+                                    SetPlayerAvatar(g_availableAvatars[g_currentAvatarIndex].second, engine, character, avatarEntity, editor);
+                                }
+                                break;
+                            }
                             case SDLK_q: playCamera.yaw -= 0.12f; break;
-                            case SDLK_e: playCamera.yaw += 0.12f; break;
                             case SDLK_LEFT: playCamera.yaw -= 0.08f; break;
                             case SDLK_RIGHT: playCamera.yaw += 0.08f; break;
                             case SDLK_UP: playCamera.pitch = std::min(playCamera.maxPitch, playCamera.pitch + 0.06f); break;
@@ -934,15 +1040,27 @@ int main(int argc, char* argv[]) {
             lastSkinningMs = std::chrono::duration<float, std::milli>(tSkinEnd - tSkinStart).count();
         }
 
+        // Procedural subtle breathing & posture sway for Photo-to-3D models
+        float breatheWave = std::sin(totalAppTime * 2.2f);
+        for (const auto& ed : editor.entities) {
+            if (ed.name.find("_3D") != std::string::npos && editor.animatedEntities.count(ed.id) == 0) {
+                auto itTr = engine.world.transforms.find(ed.id);
+                if (itTr != engine.world.transforms.end()) {
+                    itTr->second.scale = ed.scale * (1.0f + 0.012f * breatheWave);
+                    itTr->second.position.y = ed.position.y + 0.004f * breatheWave;
+                }
+            }
+        }
+
         // --- 3. Dual-Backend Rendering Execution ---
         auto tRenderStart = std::chrono::high_resolution_clock::now();
 
         if (hybridRenderer.backend == Surreal::RenderBackend::GPU_OPENGL && hybridRenderer.isGLInitialized) {
             // --- GPU HARDWARE OPENGL 4.6 PIPELINE ---
-            hybridRenderer.BeginFrame();
+            hybridRenderer.BeginFrame(skyProfiles[currentSkyProfile].skyColor);
             hybridRenderer.SetGlobalUniforms(
                 engine.world.sunLight.direction,
-                engine.world.sunLight.color,
+                engine.world.sunLight.color * engine.world.sunLight.intensity,
                 engine.world.ambientLight,
                 engine.cameraPos
             );
@@ -957,6 +1075,31 @@ int main(int argc, char* argv[]) {
 
                 bool isDynamic = (entityID == avatarEntity) || (editor.animatedEntities.count(entityID) > 0);
                 hybridRenderer.RenderMesh(itMr->second.mesh, itTr->second.GetWorldMatrix(), vpMat, itMr->second.material, isDynamic);
+            }
+
+            // Real-Time Contact Ground Shadows
+            if (shadowDiscMesh) {
+                Surreal::PBRMaterial shadowMat;
+                shadowMat.albedo = Surreal::ColorRGB(0.01f, 0.01f, 0.02f);
+                shadowMat.metallic = 0.0f;
+                shadowMat.roughness = 1.0f;
+
+                // Player Shadow
+                float jumpH = std::max(0.0f, charPos.y);
+                float pScale = std::max(0.35f, 1.0f / (1.0f + jumpH * 0.7f));
+                Surreal::Vec3 pOffset = engine.world.sunLight.direction * (0.08f + jumpH * 0.12f);
+                Surreal::Mat4 pShadowMat = Surreal::Mat4::Translation(Surreal::Vec3(charPos.x + pOffset.x, 0.003f, charPos.z + pOffset.z)) *
+                                           Surreal::Mat4::Scaling(Surreal::Vec3(pScale, 1.0f, pScale));
+                hybridRenderer.RenderMesh(shadowDiscMesh, pShadowMat, vpMat, shadowMat, false);
+
+                // NPC and Photo Shadows
+                for (const auto& ed : editor.entities) {
+                    if (ed.isCharacter || editor.animatedEntities.count(ed.id) > 0 || ed.name.find("_3D") != std::string::npos) {
+                        Surreal::Mat4 npcShadow = Surreal::Mat4::Translation(Surreal::Vec3(ed.position.x, 0.003f, ed.position.z)) *
+                                                  Surreal::Mat4::Scaling(Surreal::Vec3(1.1f, 1.0f, 1.1f));
+                        hybridRenderer.RenderMesh(shadowDiscMesh, npcShadow, vpMat, shadowMat, false);
+                    }
+                }
             }
 
             // Draw Live 3D Placement Model Preview (GPU)
@@ -988,6 +1131,43 @@ int main(int argc, char* argv[]) {
                     benchResults.isCompleted ? &benchResults : nullptr,
                     aionLink.generation, aionLink.connected
                 );
+            }
+
+            // 3D Floating Hologram Speech Bubble above Player Avatar
+            Surreal::Vec4 headClip = vpMat.TransformVec4(Surreal::Vec4(charPos.x, charPos.y + 2.05f, charPos.z, 1.0f));
+            if (headClip.w > 0.1f) {
+                float ndcX = headClip.x / headClip.w;
+                float ndcY = headClip.y / headClip.w;
+                if (ndcX >= -0.95f && ndcX <= 0.95f && ndcY >= -0.95f && ndcY <= 0.95f) {
+                    int sx = static_cast<int>((ndcX * 0.5f + 0.5f) * winW);
+                    int sy = static_cast<int>((1.0f - (ndcY * 0.5f + 0.5f)) * winH);
+
+                    // Check nearest dancer for duet prompt
+                    std::string nearDancer;
+                    for (const auto& ed : editor.entities) {
+                        if (editor.animatedEntities.count(ed.id) > 0 && (ed.position - charPos).Length() < 2.8f) {
+                            nearDancer = ed.name;
+                            break;
+                        }
+                    }
+
+                    if (!nearDancer.empty()) {
+                        char duetBuf[128];
+                        std::snprintf(duetBuf, sizeof(duetBuf), "[E] Dance Duet mit %s!", nearDancer.c_str());
+                        int dw = 260, dh = 24;
+                        int dx = std::max(10, std::min((int)winW - dw - 10, sx - dw / 2));
+                        int dy = std::max(30, std::min((int)winH - dh - 10, sy - 34));
+                        Surreal::SurrealHUD::DrawPanel(hudFramebuffer.data(), winW, winH, dx, dy, dw, dh, 0x0D1B2A, 0.92f);
+                        Surreal::SurrealHUD::DrawString(hudFramebuffer.data(), winW, winH, dx + 10, dy + 7, duetBuf, 0xFFFF0077, 1);
+                    } else {
+                        // Hologram status badge
+                        int hw = 230, hh = 26;
+                        int hx = std::max(10, std::min((int)winW - hw - 10, sx - hw / 2));
+                        int hy = std::max(30, std::min((int)winH - hh - 10, sy - 32));
+                        Surreal::SurrealHUD::DrawPanel(hudFramebuffer.data(), winW, winH, hx, hy, hw, hh, 0x050E18, 0.85f);
+                        Surreal::SurrealHUD::DrawString(hudFramebuffer.data(), winW, winH, hx + 8, hy + 8, "[AION] Seoul Metropolis", 0xFF00FFFF, 1);
+                    }
+                }
             }
 
             editor.RenderEditorHUD(hudFramebuffer.data(), winW, winH, currentFps, engine.lastFrameTimeMs, hybridRenderer.GetBackendName());

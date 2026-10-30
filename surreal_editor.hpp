@@ -1030,7 +1030,7 @@ public:
         SurrealHUD::DrawString(fb, screenW, screenH, 24, 22, modeTitle, modeColor, 1);
 
         char metaBuf[256];
-        std::snprintf(metaBuf, sizeof(metaBuf), "FPS: %.1f | %s | [TAB] Switch",
+        std::snprintf(metaBuf, sizeof(metaBuf), "FPS: %.1f | %s | [TAB] Switch | [N] Sky | [E] Dance",
                       currentFps, backendName.c_str());
         SurrealHUD::DrawString(fb, screenW, screenH, screenW - 480, 22, metaBuf, 0xFF00FF88, 1);
 
