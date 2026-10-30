@@ -96,6 +96,7 @@ int main(int argc, char* argv[]) {
     bool loadCity = true; // Default: Seoul City 3D photorealistic environment
     bool loadParkour = false;
     std::string requestedAvatar = "";
+    std::string photoPath = "";   // --photo <image>: build a coloured 3D model from a picture
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--fullscreen") startFullscreen = true;
@@ -103,6 +104,8 @@ int main(int argc, char* argv[]) {
         if (arg == "--no-city" || arg == "--bare") loadCity = false;
         if (arg == "--seoul" || arg == "--city") loadCity = true;
         if (arg == "--parkour") loadParkour = true;
+        if (arg == "--photo" && i + 1 < argc) photoPath = argv[++i];
+        else if (arg.rfind("--photo=", 0) == 0) photoPath = arg.substr(8);
         if (arg == "--avatar" && i + 1 < argc) requestedAvatar = argv[++i];
         else if (arg.rfind("--avatar=", 0) == 0) requestedAvatar = arg.substr(9);
         if (arg == "--benchmark-headless") {
@@ -306,6 +309,40 @@ int main(int argc, char* argv[]) {
             cityEd.isStaticTerrain = true;
             editor.entities.push_back(cityEd);
             std::cout << "[✓] Seoul City 3D Environment Spawned into Live Scene!\n";
+        }
+    }
+
+    // Optional Photo-to-3D model (via --photo <image.png|jpg>), placed next to the avatar
+    if (!photoPath.empty()) {
+        Surreal::Image3DInfo p3dInfo;
+        auto photoMesh = Surreal::SurrealImage3D::BuildFromFile(photoPath, Surreal::Image3DOptions(), &p3dInfo);
+        if (photoMesh) {
+            std::string photoName = Surreal::SurrealEditor::GetCleanName(std::filesystem::path(photoPath).filename().string()) + "_3D";
+            Surreal::EntityID pe = engine.world.CreateEntity(photoName);
+            Surreal::TransformComponent& pt = engine.world.transforms[pe];
+            pt.position = Surreal::Vec3(1.6f, 0.0f, 0.0f);
+            pt.scale = Surreal::Vec3(1.0f, 1.0f, 1.0f);
+            Surreal::MeshRendererComponent pmr;
+            pmr.mesh = photoMesh;
+            pmr.material.albedo = Surreal::ColorRGB(1.0f, 1.0f, 1.0f);
+            pmr.material.metallic = 0.05f;
+            pmr.material.roughness = 0.85f;
+            engine.world.meshRenderers[pe] = pmr;
+
+            Surreal::EditableEntity ped;
+            ped.id = pe;
+            ped.name = photoName;
+            ped.position = pt.position;
+            ped.scale = pt.scale;
+            ped.color = pmr.material.albedo;
+            ped.metallic = pmr.material.metallic;
+            ped.roughness = pmr.material.roughness;
+            editor.entities.push_back(ped);
+            std::cout << "[✓] Photo-to-3D: " << photoName << " (" << photoMesh->vertices.size() << " Verts, "
+                      << photoMesh->indices.size() / 3 << " Tris)"
+                      << (p3dInfo.plateMode ? " [Platte: kein Hintergrund erkannt]" : "") << "\n";
+        } else {
+            std::cerr << "[-] Photo-to-3D fehlgeschlagen: " << p3dInfo.error << "\n";
         }
     }
 

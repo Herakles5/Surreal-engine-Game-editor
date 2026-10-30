@@ -13,6 +13,7 @@
 #include "surreal_camera.hpp"
 #include "surreal_hud.hpp"
 #include "surreal_model_loader.hpp"
+#include "surreal_image3d.hpp"
 #include <vector>
 #include <string>
 #include <fstream>
@@ -90,7 +91,8 @@ public:
         DANCERS = 0,
         AVATARS = 1,
         WORLDS_PROPS = 2,
-        ALL = 3
+        ALL = 3,
+        PHOTO3D = 4   // pictures in <models>/photo3d/ -> coloured 3D model (Photo-to-3D)
     };
     CatalogCategory activeCategory = CatalogCategory::DANCERS;
     std::vector<DiscoveredModelFile> activeCatalogList;
@@ -263,11 +265,20 @@ public:
         return base;
     }
 
+    static bool IsImageFile(const DiscoveredModelFile& item) {
+        return SurrealImage3D::IsImageExt(item.extension);
+    }
+
     void UpdateCatalogFilter() {
         activeCatalogList.clear();
         for (const auto& item : folderModels) {
+            const bool isImg = IsImageFile(item);
             if (activeCategory == CatalogCategory::ALL) {
                 activeCatalogList.push_back(item);
+            } else if (activeCategory == CatalogCategory::PHOTO3D) {
+                if (isImg) activeCatalogList.push_back(item);
+            } else if (isImg) {
+                continue; // pictures only show up in PHOTO->3D and ALL
             } else if (activeCategory == CatalogCategory::DANCERS) {
                 if (IsDanceModel(item.filename)) activeCatalogList.push_back(item);
             } else if (activeCategory == CatalogCategory::AVATARS) {
@@ -276,24 +287,36 @@ public:
                 if (IsWorldOrPropModel(item.filename) || item.extension == ".obj") activeCatalogList.push_back(item);
             }
         }
-        if (activeCatalogList.empty()) {
+        if (activeCatalogList.empty() && activeCategory != CatalogCategory::PHOTO3D) {
             activeCatalogList = folderModels;
         }
         catalogPage = 0;
+    }
+
+    static const char* CategoryLabel(CatalogCategory c, bool longName) {
+        switch (c) {
+            case CatalogCategory::DANCERS:      return longName ? "DANCING MODELS" : "DANCERS";
+            case CatalogCategory::AVATARS:      return longName ? "AION AVATARS" : "AVATARS";
+            case CatalogCategory::WORLDS_PROPS: return longName ? "WORLDS & PROPS" : "WORLDS";
+            case CatalogCategory::PHOTO3D:      return longName ? "PHOTO -> 3D (Bilder)" : "PHOTO3D";
+            default:                            return longName ? "ALL MODELS" : "ALL";
+        }
     }
 
     void CycleCategory() {
         switch (activeCategory) {
             case CatalogCategory::DANCERS: activeCategory = CatalogCategory::AVATARS; break;
             case CatalogCategory::AVATARS: activeCategory = CatalogCategory::WORLDS_PROPS; break;
-            case CatalogCategory::WORLDS_PROPS: activeCategory = CatalogCategory::ALL; break;
+            case CatalogCategory::WORLDS_PROPS: activeCategory = CatalogCategory::PHOTO3D; break;
+            case CatalogCategory::PHOTO3D: activeCategory = CatalogCategory::ALL; break;
             case CatalogCategory::ALL: activeCategory = CatalogCategory::DANCERS; break;
         }
         UpdateCatalogFilter();
-        std::string catName = (activeCategory == CatalogCategory::DANCERS) ? "DANCING MODELS" :
-                              (activeCategory == CatalogCategory::AVATARS) ? "AION AVATARS" :
-                              (activeCategory == CatalogCategory::WORLDS_PROPS) ? "WORLDS & PROPS" : "ALL MODELS";
-        SetStatus("[*] Category: " + catName + " (" + std::to_string(activeCatalogList.size()) + " files)", 3.0f);
+        std::string msg = std::string("[*] Category: ") + CategoryLabel(activeCategory, true) + " (" + std::to_string(activeCatalogList.size()) + " files)";
+        if (activeCategory == CatalogCategory::PHOTO3D && activeCatalogList.empty()) {
+            msg += " - lege PNG/JPG nach assets/models/photo3d/ und druecke [F5]";
+        }
+        SetStatus(msg, activeCategory == CatalogCategory::PHOTO3D ? 5.0f : 3.0f);
     }
 
     int GetTotalCatalogPages() const {
@@ -391,9 +414,7 @@ public:
         showModelCatalog = !showModelCatalog;
         if (showModelCatalog) {
             RefreshModelFolder();
-            std::string catName = (activeCategory == CatalogCategory::DANCERS) ? "DANCERS" :
-                                  (activeCategory == CatalogCategory::AVATARS) ? "AVATARS" :
-                                  (activeCategory == CatalogCategory::WORLDS_PROPS) ? "WORLDS" : "ALL";
+            std::string catName = CategoryLabel(activeCategory, false);
             SetStatus("[*] 3D Model Importer [" + catName + "]: " + std::to_string(activeCatalogList.size()) + " items. Choose [1]-[8], [T] Category, [,] [.] Page", 4.0f);
         }
     }
@@ -410,7 +431,19 @@ public:
         placementSkeletal = nullptr;
 
         bool loaded = false;
-        if (file.extension == ".obj") {
+        bool isPhoto = IsImageFile(file);
+        if (isPhoto) {
+            Image3DOptions opt;
+            Image3DInfo info;
+            placementMesh = SurrealImage3D::BuildFromFile(file.fullPath, opt, &info);
+            loaded = (placementMesh != nullptr);
+            placementMetallic = 0.05f;   // matte, so the picture colours stay faithful
+            placementRoughness = 0.85f;
+            if (!loaded) {
+                SetStatus("[-] Photo->3D: " + info.error, 5.0f);
+                return;
+            }
+        } else if (file.extension == ".obj") {
             placementColor = colorPalette[currentPaletteIdx % colorPalette.size()];
             loaded = SurrealModelLoader::LoadCustomFile(file.fullPath, placementMesh, placementColor);
         } else if (file.extension == ".gltf" || file.extension == ".glb") {
@@ -441,7 +474,9 @@ public:
                                   baseName.find("Seoul") != std::string::npos ||
                                   baseName.find("Map") != std::string::npos ||
                                   baseName.find("World") != std::string::npos);
-            if (isEnvironment) {
+            if (isPhoto) {
+                scaleFactor = 1.0f; // Photo->3D meshes are already built at ~1.8 m
+            } else if (isEnvironment) {
                 scaleFactor = 1.0f; // Keep real-world 1:1 scale for cities & environments!
             } else if (IsDanceModel(file.filename) || IsAvatarModel(file.filename)) {
                 // Humanoid characters: normalize height to ~1.80m tall
@@ -1080,9 +1115,7 @@ public:
 
             char folderBuf[160];
             std::string dispFolder = modelFolders[activeFolderIndex % modelFolders.size()];
-            std::string catName = (activeCategory == CatalogCategory::DANCERS) ? "DANCING MODELS" :
-                                  (activeCategory == CatalogCategory::AVATARS) ? "AION AVATARS" :
-                                  (activeCategory == CatalogCategory::WORLDS_PROPS) ? "WORLDS & PROPS" : "ALL MODELS";
+            std::string catName = CategoryLabel(activeCategory, true);
             std::snprintf(folderBuf, sizeof(folderBuf), "Category: [%s] (Press [T]) | Folder: [%s] (%zu files) | Page %d/%d",
                           catName.c_str(), dispFolder.c_str(), activeCatalogList.size(), catalogPage + 1, totalPages);
             SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, diagY + 34, folderBuf, 0xFF88AABB, 1);
@@ -1099,7 +1132,10 @@ public:
 
                 uint32_t itemCol = 0xFF00E5FF;
                 const char* tag = "[PROP]";
-                if (IsDanceModel(item.filename)) {
+                if (IsImageFile(item)) {
+                    itemCol = 0xFF66FF66; // Photo -> 3D
+                    tag = "[PHOTO]";
+                } else if (IsDanceModel(item.filename)) {
                     itemCol = 0xFFFF1493; // Deep / Hot Pink
                     tag = "[DANCE]";
                 } else if (IsAvatarModel(item.filename)) {
