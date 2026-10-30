@@ -65,6 +65,8 @@ public:
     GLint uAlbedoLoc;
     GLint uMetallicLoc;
     GLint uRoughnessLoc;
+    GLint uAlbedoMapLoc;
+    GLint uHasTextureLoc;
 
     std::string glVendor;
     std::string glRenderer;
@@ -248,12 +250,51 @@ public:
         glUniformMatrix4fv(uMVPLoc, 1, GL_TRUE, &mvpMat.m[0][0]);
         glUniformMatrix4fv(uModelLoc, 1, GL_TRUE, &worldMat.m[0][0]);
 
-        glUniform3f(uAlbedoLoc, material.albedo.r, material.albedo.g, material.albedo.b);
-        glUniform1f(uMetallicLoc, material.metallic);
-        glUniform1f(uRoughnessLoc, material.roughness);
-
         glBindVertexArray(it->second.vao);
-        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(it->second.indexCount), GL_UNSIGNED_INT, 0);
+
+        if (mesh->submeshes.empty()) {
+            glUniform1i(uHasTextureLoc, 0);
+            glUniform3f(uAlbedoLoc, material.albedo.r, material.albedo.g, material.albedo.b);
+            glUniform1f(uMetallicLoc, material.metallic);
+            glUniform1f(uRoughnessLoc, material.roughness);
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(it->second.indexCount), GL_UNSIGNED_INT, 0);
+        } else {
+            glActiveTexture(GL_TEXTURE0);
+            glUniform1i(uAlbedoMapLoc, 0);
+
+            for (auto& sub : mesh->submeshes) {
+                if (sub.indexCount == 0) continue;
+
+                // Lazy GPU texture upload
+                if (sub.textureId == 0 && sub.texRGBA && !sub.texRGBA->empty()) {
+                    glGenTextures(1, &sub.textureId);
+                    glBindTexture(GL_TEXTURE_2D, sub.textureId);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, sub.texWidth, sub.texHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, sub.texRGBA->data());
+                    glGenerateMipmap(GL_TEXTURE_2D);
+                }
+
+                if (sub.textureId != 0) {
+                    glBindTexture(GL_TEXTURE_2D, sub.textureId);
+                    glUniform1i(uHasTextureLoc, 1);
+                } else {
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                    glUniform1i(uHasTextureLoc, 0);
+                }
+
+                ColorRGB effectiveAlbedo = sub.albedo * material.albedo;
+                glUniform3f(uAlbedoLoc, effectiveAlbedo.r, effectiveAlbedo.g, effectiveAlbedo.b);
+                glUniform1f(uMetallicLoc, sub.metallic);
+                glUniform1f(uRoughnessLoc, sub.roughness);
+
+                glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sub.indexCount), GL_UNSIGNED_INT,
+                               reinterpret_cast<const void*>(static_cast<uintptr_t>(sub.indexOffset * sizeof(uint32_t))));
+            }
+        }
+
         glBindVertexArray(0);
     }
 
@@ -363,6 +404,8 @@ uniform vec3 uCamPos;
 uniform vec3 uAlbedo;
 uniform float uMetallic;
 uniform float uRoughness;
+uniform sampler2D uAlbedoMap;
+uniform int uHasTexture;
 
 const float PI = 3.14159265359;
 
@@ -398,12 +441,20 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 }
 
 void main() {
+    float alpha = vColor.a;
+    vec3 baseAlbedo = uAlbedo * vColor.rgb;
+    if (uHasTexture == 1) {
+        vec4 texSample = texture(uAlbedoMap, vTexCoord);
+        if (texSample.a < 0.15) discard; // Alpha cutout for foliage, leaves & grates
+        baseAlbedo *= texSample.rgb;
+        alpha *= texSample.a;
+    }
+    vec3 albedo = baseAlbedo;
+
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCamPos - vFragPos);
     vec3 L = normalize(uSunDir);
     vec3 H = normalize(V + L);
-
-    vec3 albedo = uAlbedo * vColor.rgb;
 
     vec3 F0 = vec3(0.04);
     F0 = mix(F0, albedo, uMetallic);
@@ -450,7 +501,7 @@ void main() {
     // Gamma Correction (sRGB standard)
     color = pow(color, vec3(1.0 / 2.2));
 
-    FragColor = vec4(color, vColor.a);
+    FragColor = vec4(color, alpha);
 }
 )";
 
@@ -475,6 +526,8 @@ void main() {
         uAlbedoLoc = glGetUniformLocation(pbrProg, "uAlbedo");
         uMetallicLoc = glGetUniformLocation(pbrProg, "uMetallic");
         uRoughnessLoc = glGetUniformLocation(pbrProg, "uRoughness");
+        uAlbedoMapLoc = glGetUniformLocation(pbrProg, "uAlbedoMap");
+        uHasTextureLoc = glGetUniformLocation(pbrProg, "uHasTexture");
 
         // 3. Fullscreen Quad Blit Shader
         const char* qVS = R"(

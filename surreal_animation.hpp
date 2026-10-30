@@ -25,6 +25,7 @@
 #include <cstring>
 #include <algorithm>
 #include <iostream>
+#include <map>
 
 namespace Surreal {
 
@@ -481,22 +482,183 @@ public:
             outInstance.clips.push_back(clip);
         }
 
-        // 3. Texture Cache & Albedo Texture Loader
-        struct RawTextureBuffer {
-            int width = 0;
-            int height = 0;
-            int channels = 0;
-            unsigned char* pixels = nullptr;
-            ~RawTextureBuffer() {
-                if (pixels) stbi_image_free(pixels);
-            }
-        };
-
+        // 3. Texture Cache & Loader (storing RGBA buffer in SubMesh)
         size_t lastSlash = filepath.find_last_of("/\\");
         std::string baseDir = (lastSlash != std::string::npos) ? filepath.substr(0, lastSlash) : ".";
-        std::unordered_map<std::string, std::shared_ptr<RawTextureBuffer>> texCache;
 
-        // 4. Parse Mesh Vertices with Joint Indices & Weights & Texture Colors
+        struct RawTex {
+            int w = 0, h = 0;
+            std::shared_ptr<std::vector<uint8_t>> rgba;
+        };
+        std::map<const void*, RawTex> texCache;
+
+        auto getTex = [&](cgltf_image* img) -> RawTex {
+            RawTex res;
+            if (!img) return res;
+            const void* key = img->buffer_view ? (const void*)img->buffer_view : (const void*)img->uri;
+            if (texCache.count(key)) return texCache[key];
+
+            int w = 0, h = 0, ch = 0;
+            unsigned char* pix = nullptr;
+            if (img->buffer_view && img->buffer_view->buffer && img->buffer_view->buffer->data) {
+                const uint8_t* ptr = (const uint8_t*)img->buffer_view->buffer->data + img->buffer_view->offset;
+                pix = stbi_load_from_memory(ptr, (int)img->buffer_view->size, &w, &h, &ch, 4);
+            } else if (img->uri) {
+                std::string full = baseDir + "/" + img->uri;
+                pix = stbi_load(full.c_str(), &w, &h, &ch, 4);
+            }
+            if (pix) {
+                res.w = w;
+                res.h = h;
+                res.rgba = std::make_shared<std::vector<uint8_t>>(pix, pix + (w * h * 4));
+                stbi_image_free(pix);
+                texCache[key] = res;
+            }
+            return res;
+        };
+
+        // 4. Static / Scene Graph Models without Skins (Seoul City, Environments, Props)
+        if (data->skins_count == 0) {
+            outInstance.activeDeformedMesh->vertices.clear();
+            outInstance.activeDeformedMesh->indices.clear();
+            outInstance.activeDeformedMesh->submeshes.clear();
+
+            for (cgltf_size i = 0; i < data->nodes_count; ++i) {
+                cgltf_node* node = &data->nodes[i];
+                if (!node->mesh) continue;
+
+                float m[16];
+                cgltf_node_transform_world(node, m);
+
+                cgltf_mesh* gMesh = node->mesh;
+                for (cgltf_size p = 0; p < gMesh->primitives_count; ++p) {
+                    const cgltf_primitive& prim = gMesh->primitives[p];
+                    if (prim.type != cgltf_primitive_type_triangles) continue;
+
+                    const cgltf_accessor* posAcc = nullptr;
+                    const cgltf_accessor* normAcc = nullptr;
+                    const cgltf_accessor* uvAcc = nullptr;
+
+                    for (cgltf_size a = 0; a < prim.attributes_count; ++a) {
+                        if (prim.attributes[a].type == cgltf_attribute_type_position) posAcc = prim.attributes[a].data;
+                        else if (prim.attributes[a].type == cgltf_attribute_type_normal) normAcc = prim.attributes[a].data;
+                        else if (prim.attributes[a].type == cgltf_attribute_type_texcoord && prim.attributes[a].index == 0) uvAcc = prim.attributes[a].data;
+                    }
+                    if (!posAcc) continue;
+
+                    SubMesh sub;
+                    sub.indexOffset = static_cast<uint32_t>(outInstance.activeDeformedMesh->indices.size());
+
+                    bool hasUvTransform = false;
+                    float uvScale[2] = {1.0f, 1.0f};
+                    float uvOffset[2] = {0.0f, 0.0f};
+
+                    if (prim.material && prim.material->has_pbr_metallic_roughness) {
+                        const auto& pbr = prim.material->pbr_metallic_roughness;
+                        sub.albedo = ColorRGB(pbr.base_color_factor[0], pbr.base_color_factor[1], pbr.base_color_factor[2]);
+                        sub.metallic = pbr.metallic_factor;
+                        sub.roughness = pbr.roughness_factor;
+
+                        if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
+                            RawTex rt = getTex(pbr.base_color_texture.texture->image);
+                            sub.texWidth = rt.w;
+                            sub.texHeight = rt.h;
+                            sub.texRGBA = rt.rgba;
+
+                            if (pbr.base_color_texture.has_transform) {
+                                hasUvTransform = true;
+                                uvScale[0] = pbr.base_color_texture.transform.scale[0];
+                                uvScale[1] = pbr.base_color_texture.transform.scale[1];
+                                uvOffset[0] = pbr.base_color_texture.transform.offset[0];
+                                uvOffset[1] = pbr.base_color_texture.transform.offset[1];
+                            }
+                        }
+                    }
+
+                    uint32_t vertBase = static_cast<uint32_t>(outInstance.activeDeformedMesh->vertices.size());
+                    outInstance.activeDeformedMesh->vertices.resize(vertBase + posAcc->count);
+
+                    for (cgltf_size v = 0; v < posAcc->count; ++v) {
+                        Vertex3D& vert = outInstance.activeDeformedMesh->vertices[vertBase + v];
+
+                        float lp[3];
+                        cgltf_accessor_read_float(posAcc, v, lp, 3);
+                        vert.position.x = m[0]*lp[0] + m[4]*lp[1] + m[8]*lp[2]  + m[12];
+                        vert.position.y = m[1]*lp[0] + m[5]*lp[1] + m[9]*lp[2]  + m[13];
+                        vert.position.z = m[2]*lp[0] + m[6]*lp[1] + m[10]*lp[2] + m[14];
+
+                        if (normAcc) {
+                            float ln[3];
+                            cgltf_accessor_read_float(normAcc, v, ln, 3);
+                            float nx = m[0]*ln[0] + m[4]*ln[1] + m[8]*ln[2];
+                            float ny = m[1]*ln[0] + m[5]*ln[1] + m[9]*ln[2];
+                            float nz = m[2]*ln[0] + m[6]*ln[1] + m[10]*ln[2];
+                            float len = sqrtf(nx*nx + ny*ny + nz*nz);
+                            if (len > 1e-6f) { nx /= len; ny /= len; nz /= len; }
+                            vert.normal = Vec3(nx, ny, nz);
+                        } else {
+                            vert.normal = Vec3(0, 1.0f, 0);
+                        }
+
+                        if (uvAcc) {
+                            float uv[2];
+                            cgltf_accessor_read_float(uvAcc, v, uv, 2);
+                            if (hasUvTransform) {
+                                vert.u = uv[0] * uvScale[0] + uvOffset[0];
+                                vert.v = uv[1] * uvScale[1] + uvOffset[1];
+                            } else {
+                                vert.u = uv[0];
+                                vert.v = uv[1];
+                            }
+                        }
+                        vert.color = Vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                    }
+
+                    if (prim.indices) {
+                        sub.indexCount = static_cast<uint32_t>(prim.indices->count);
+                        outInstance.activeDeformedMesh->indices.reserve(outInstance.activeDeformedMesh->indices.size() + sub.indexCount);
+                        for (cgltf_size k = 0; k < prim.indices->count; ++k) {
+                            uint32_t idx = static_cast<uint32_t>(cgltf_accessor_read_index(prim.indices, k));
+                            outInstance.activeDeformedMesh->indices.push_back(vertBase + idx);
+                        }
+                    } else {
+                        sub.indexCount = static_cast<uint32_t>(posAcc->count);
+                        for (uint32_t k = 0; k < sub.indexCount; ++k) {
+                            outInstance.activeDeformedMesh->indices.push_back(vertBase + k);
+                        }
+                    }
+
+                    outInstance.activeDeformedMesh->submeshes.push_back(sub);
+                }
+            }
+
+            outInstance.activeDeformedMesh->CalculateBounds();
+            float minY = outInstance.activeDeformedMesh->worldBounds.min.y;
+            if (fabs(minY) > 0.001f) {
+                for (auto& v : outInstance.activeDeformedMesh->vertices) {
+                    v.position.y -= minY;
+                }
+                outInstance.activeDeformedMesh->CalculateBounds();
+            }
+
+            outInstance.bindVertices.resize(outInstance.activeDeformedMesh->vertices.size());
+            for (size_t i = 0; i < outInstance.activeDeformedMesh->vertices.size(); ++i) {
+                const auto& v = outInstance.activeDeformedMesh->vertices[i];
+                SkinnedVertex3D sv;
+                sv.position = v.position;
+                sv.normal = v.normal;
+                sv.u = v.u;
+                sv.v = v.v;
+                sv.color = v.color;
+                outInstance.bindVertices[i] = sv;
+            }
+
+            outInstance.activeDeformedMesh->BuildClusters();
+            cgltf_free(data);
+            return true;
+        }
+
+        // 5. Parse Mesh Vertices with Joint Indices & Weights for Skinned Avatars
         uint32_t vertexBase = 0;
         for (cgltf_size m = 0; m < data->meshes_count; ++m) {
             const cgltf_mesh& gMesh = data->meshes[m];
@@ -504,10 +666,9 @@ public:
                 const cgltf_primitive& prim = gMesh.primitives[p];
                 if (prim.type != cgltf_primitive_type_triangles) continue;
 
-                // Material Texture & Tint Extraction
-                std::shared_ptr<RawTextureBuffer> activeTex = nullptr;
+                SubMesh sub;
+                sub.indexOffset = static_cast<uint32_t>(outInstance.activeDeformedMesh->indices.size());
                 float baseFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-                bool hasCustomTint = false;
 
                 if (prim.material && prim.material->has_pbr_metallic_roughness) {
                     const auto& pbr = prim.material->pbr_metallic_roughness;
@@ -515,47 +676,15 @@ public:
                     baseFactor[1] = pbr.base_color_factor[1];
                     baseFactor[2] = pbr.base_color_factor[2];
                     baseFactor[3] = pbr.base_color_factor[3];
+                    sub.albedo = ColorRGB(baseFactor[0], baseFactor[1], baseFactor[2]);
+                    sub.metallic = pbr.metallic_factor;
+                    sub.roughness = pbr.roughness_factor;
 
                     if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
-                        cgltf_image* img = pbr.base_color_texture.texture->image;
-                        const char* uri = img->uri;
-                        if (uri) {
-                            std::string fullPath = baseDir + "/" + uri;
-                            auto it = texCache.find(fullPath);
-                            if (it == texCache.end()) {
-                                auto rawT = std::make_shared<RawTextureBuffer>();
-                                rawT->pixels = stbi_load(fullPath.c_str(), &rawT->width, &rawT->height, &rawT->channels, 4);
-                                if (rawT->pixels) {
-                                    std::cout << "[+] Loaded 3D Texture: " << uri
-                                              << " (" << rawT->width << "x" << rawT->height << ")\n";
-                                }
-                                texCache[fullPath] = rawT;
-                                activeTex = rawT;
-                            } else {
-                                activeTex = it->second;
-                            }
-                        } else if (img->buffer_view && img->buffer_view->buffer && img->buffer_view->buffer->data) {
-                            std::string memKey = "glb_mem_" + std::to_string(reinterpret_cast<uintptr_t>(img));
-                            auto it = texCache.find(memKey);
-                            if (it == texCache.end()) {
-                                const uint8_t* ptr = static_cast<const uint8_t*>(img->buffer_view->buffer->data) + img->buffer_view->offset;
-                                size_t size = img->buffer_view->size;
-                                auto rawT = std::make_shared<RawTextureBuffer>();
-                                rawT->pixels = stbi_load_from_memory(ptr, static_cast<int>(size), &rawT->width, &rawT->height, &rawT->channels, 4);
-                                if (rawT->pixels) {
-                                    std::cout << "[+] Loaded Embedded GLB Texture (" << rawT->width << "x" << rawT->height << ")\n";
-                                }
-                                texCache[memKey] = rawT;
-                                activeTex = rawT;
-                            } else {
-                                activeTex = it->second;
-                            }
-                        }
-                    }
-
-                    // Special custom tinting (e.g. black leather gloves)
-                    if (baseFactor[0] < 0.1f && baseFactor[1] < 0.1f && baseFactor[2] < 0.1f) {
-                        hasCustomTint = true;
+                        RawTex rt = getTex(pbr.base_color_texture.texture->image);
+                        sub.texWidth = rt.w;
+                        sub.texHeight = rt.h;
+                        sub.texRGBA = rt.rgba;
                     }
                 }
 
@@ -598,35 +727,18 @@ public:
                         vert.u = uv[0]; vert.v = uv[1];
                     }
 
-                    // Sample Color from Diffuse/Albedo Texture
-                    float colR = 1.0f, colG = 1.0f, colB = 1.0f;
-                    if (activeTex && activeTex->pixels && uvAcc) {
+                    // Sample Color from Diffuse/Albedo Texture for software fallback
+                    float colR = sub.albedo.r, colG = sub.albedo.g, colB = sub.albedo.b;
+                    if (sub.texRGBA && !sub.texRGBA->empty() && uvAcc) {
                         float u_wrap = vert.u - std::floor(vert.u);
                         float v_wrap = vert.v - std::floor(vert.v);
-                        int tx = std::max(0, std::min(activeTex->width - 1, static_cast<int>(u_wrap * activeTex->width)));
-                        int ty = std::max(0, std::min(activeTex->height - 1, static_cast<int>(v_wrap * activeTex->height)));
-                        int pIdx = (ty * activeTex->width + tx) * 4;
+                        int tx = std::max(0, std::min(sub.texWidth - 1, static_cast<int>(u_wrap * sub.texWidth)));
+                        int ty = std::max(0, std::min(sub.texHeight - 1, static_cast<int>(v_wrap * sub.texHeight)));
+                        int pIdx = (ty * sub.texWidth + tx) * 4;
 
-                        colR = activeTex->pixels[pIdx + 0] / 255.0f;
-                        colG = activeTex->pixels[pIdx + 1] / 255.0f;
-                        colB = activeTex->pixels[pIdx + 2] / 255.0f;
-
-                        if (hasCustomTint) {
-                            colR *= baseFactor[0] * 5.0f;
-                            colG *= baseFactor[1] * 5.0f;
-                            colB *= baseFactor[2] * 5.0f;
-                        }
-                    } else if (prim.material && prim.material->has_pbr_metallic_roughness) {
-                        // Solid-color materials without textures
-                        if (hasCustomTint) {
-                            colR = std::min(1.0f, baseFactor[0] * 4.0f);
-                            colG = std::min(1.0f, baseFactor[1] * 4.0f);
-                            colB = std::min(1.0f, baseFactor[2] * 4.0f);
-                        } else {
-                            colR = baseFactor[0];
-                            colG = baseFactor[1];
-                            colB = baseFactor[2];
-                        }
+                        colR *= (*sub.texRGBA)[pIdx + 0] / 255.0f;
+                        colG *= (*sub.texRGBA)[pIdx + 1] / 255.0f;
+                        colB *= (*sub.texRGBA)[pIdx + 2] / 255.0f;
                     }
 
                     vert.color = Vec4(colR, colG, colB, 1.0f);
@@ -650,17 +762,20 @@ public:
 
                 // Indices
                 if (prim.indices) {
+                    sub.indexCount = static_cast<uint32_t>(prim.indices->count);
                     for (cgltf_size i = 0; i < prim.indices->count; ++i) {
                         outInstance.activeDeformedMesh->indices.push_back(
                             vertexBase + static_cast<uint32_t>(cgltf_accessor_read_index(prim.indices, i))
                         );
                     }
                 } else {
+                    sub.indexCount = static_cast<uint32_t>(posAcc->count);
                     for (cgltf_size i = 0; i < posAcc->count; ++i) {
                         outInstance.activeDeformedMesh->indices.push_back(vertexBase + static_cast<uint32_t>(i));
                     }
                 }
 
+                outInstance.activeDeformedMesh->submeshes.push_back(sub);
                 vertexBase += static_cast<uint32_t>(posAcc->count);
             }
         }

@@ -8,8 +8,10 @@
  */
 
 #include "surreal_math.hpp"
+#include "surreal_pbr.hpp"
 #include <vector>
 #include <stdint.h>
+#include <memory>
 
 namespace Surreal {
 
@@ -64,6 +66,21 @@ struct Meshlet {
 };
 
 /**
+ * Multi-Material SubMesh Partition for PBR Rendering & Texturing
+ */
+struct SubMesh {
+    uint32_t indexOffset = 0;
+    uint32_t indexCount = 0;
+    ColorRGB albedo = ColorRGB(1.0f, 1.0f, 1.0f);
+    float metallic = 0.2f;
+    float roughness = 0.5f;
+    uint32_t textureId = 0;
+    int texWidth = 0;
+    int texHeight = 0;
+    std::shared_ptr<std::vector<uint8_t>> texRGBA;
+};
+
+/**
  * High-Density Surreal Mesh with Meshlet Hierarchy
  */
 class SurrealMesh {
@@ -71,6 +88,7 @@ public:
     std::vector<Vertex3D> vertices;
     std::vector<uint32_t> indices;
     std::vector<Meshlet> meshlets;
+    std::vector<SubMesh> submeshes;
     AABB worldBounds;
 
     void CalculateBounds() {

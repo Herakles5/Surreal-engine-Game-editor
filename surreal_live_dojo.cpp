@@ -192,6 +192,12 @@ int main(int argc, char* argv[]) {
     // Optional Seoul City 3D Environment (via --seoul / --city)
     if (loadCity) {
         std::string cityPath = "assets/models/Seoul_City_PBR.glb";
+        if (!std::filesystem::exists(cityPath)) {
+            cityPath = "/root/coding/MeinOS/surreal_engine/assets/models/Seoul_City_PBR.glb";
+        }
+        if (!std::filesystem::exists(cityPath)) {
+            cityPath = "/root/Downloads/seoul_city__gameready__render__blender__pbr.glb";
+        }
         Surreal::SkeletalMeshInstance cityInst;
         if (Surreal::SurrealSkeletalLoader::LoadSkeletalModel(cityPath, cityInst)) {
             Surreal::EntityID cityEntity = engine.world.CreateEntity("Seoul_City");

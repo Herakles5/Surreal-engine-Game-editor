@@ -471,8 +471,13 @@ public:
         ed.color = placementColor;
         ed.metallic = placementMetallic;
         ed.roughness = placementRoughness;
-        ed.isStaticTerrain = false;
-        ed.isCharacter = (activePreset == ModelPresetType::AVATAR_CLONE);
+        bool isEnv = (placementName.find("City") != std::string::npos ||
+                      placementName.find("Seoul") != std::string::npos ||
+                      placementName.find("Map") != std::string::npos ||
+                      placementName.find("World") != std::string::npos);
+        ed.isStaticTerrain = isEnv;
+        ed.isCharacter = (activePreset == ModelPresetType::AVATAR_CLONE ||
+                          placementName.find("Avatar") != std::string::npos);
 
         entities.push_back(ed);
         selectedIndex = static_cast<int>(entities.size() - 1);
