@@ -162,6 +162,11 @@ int main(int argc, char* argv[]) {
 
     // 2a. Ground Grid Floor (24m x 24m)
     Surreal::EntityID floorEntity = engine.world.CreateEntity("CyberGridFloor");
+    Surreal::TransformComponent& ft = engine.world.transforms[floorEntity];
+    if (loadCity) {
+        ft.position = Surreal::Vec3(0, -20.0f, 0); // Place far below street level so asphalt renders cleanly
+    }
+
     Surreal::MeshRendererComponent floorRenderer;
     floorRenderer.mesh = Surreal::SurrealTerrainBuilder::CreateCyberGridFloor(24.0f, 24);
     floorRenderer.material.albedo = Surreal::ColorRGB(1.0f, 1.0f, 1.0f);
@@ -238,7 +243,7 @@ int main(int argc, char* argv[]) {
     Surreal::EditableEntity floorEd;
     floorEd.id = floorEntity;
     floorEd.name = "CyberGridFloor";
-    floorEd.position = Surreal::Vec3(0, 0, 0);
+    floorEd.position = ft.position;
     floorEd.scale = Surreal::Vec3(24.0f, 0.1f, 24.0f);
     floorEd.color = Surreal::ColorRGB(1.0f, 1.0f, 1.0f);
     floorEd.metallic = 0.20f;

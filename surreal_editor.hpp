@@ -634,7 +634,7 @@ public:
     // Move selected entity along world axes
     void MoveSelected(const Vec3& delta, SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
         EditableEntity* ent = GetSelectedEntity();
-        if (!ent || ent->isStaticTerrain) return;
+        if (!ent || ent->name == "CyberGridFloor") return;
 
         ent->position = ent->position + delta;
         if (world.transforms.find(ent->id) != world.transforms.end()) {
@@ -648,7 +648,7 @@ public:
     // Scale selected entity
     void ScaleSelected(float factor, SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
         EditableEntity* ent = GetSelectedEntity();
-        if (!ent || ent->isStaticTerrain || ent->isCharacter) return;
+        if (!ent || ent->name == "CyberGridFloor" || ent->isCharacter) return;
 
         ent->scale = ent->scale * factor;
         ent->scale.x = std::max(0.01f, ent->scale.x);
@@ -675,7 +675,7 @@ public:
         }
 
         EditableEntity* ent = GetSelectedEntity();
-        if (!ent || ent->isStaticTerrain || ent->isCharacter) return;
+        if (!ent || ent->name == "CyberGridFloor" || ent->isCharacter) return;
 
         ent->color = newColor;
         if (world.meshRenderers.find(ent->id) != world.meshRenderers.end()) {
@@ -696,7 +696,7 @@ public:
         }
 
         EditableEntity* ent = GetSelectedEntity();
-        if (!ent || ent->isStaticTerrain) return;
+        if (!ent || ent->name == "CyberGridFloor") return;
 
         if (ent->metallic < 0.3f) {
             ent->metallic = 0.50f;
@@ -794,7 +794,7 @@ public:
     // Delete Selected Entity
     void DeleteSelected(SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
         EditableEntity* ent = GetSelectedEntity();
-        if (!ent || ent->isStaticTerrain || ent->isCharacter) {
+        if (!ent || ent->name == "CyberGridFloor" || ent->isCharacter) {
             SetStatus("[!] Cannot delete core scene entity!");
             return;
         }

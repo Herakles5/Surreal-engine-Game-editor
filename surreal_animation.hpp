@@ -671,12 +671,21 @@ public:
             }
 
             outInstance.activeDeformedMesh->CalculateBounds();
-            float minY = outInstance.activeDeformedMesh->worldBounds.min.y;
-            if (fabs(minY) > 0.001f) {
-                for (auto& v : outInstance.activeDeformedMesh->vertices) {
-                    v.position.y -= minY;
+
+            // Do NOT shift world environments (e.g. Seoul City) - their roads/streets are already authored at Y=0!
+            bool isEnv = (filepath.find("City") != std::string::npos ||
+                          filepath.find("Seoul") != std::string::npos ||
+                          filepath.find("Map") != std::string::npos ||
+                          filepath.find("World") != std::string::npos ||
+                          filepath.find("street") != std::string::npos);
+            if (!isEnv) {
+                float minY = outInstance.activeDeformedMesh->worldBounds.min.y;
+                if (fabs(minY) > 0.001f) {
+                    for (auto& v : outInstance.activeDeformedMesh->vertices) {
+                        v.position.y -= minY;
+                    }
+                    outInstance.activeDeformedMesh->CalculateBounds();
                 }
-                outInstance.activeDeformedMesh->CalculateBounds();
             }
 
             outInstance.bindVertices.resize(outInstance.activeDeformedMesh->vertices.size());
