@@ -24,11 +24,14 @@ int main(int argc, char* argv[]) {
     bool startInEditor = false;
     bool startFullscreen = false;
     bool useAionLink = true;
-    bool loadCity = false;
+    bool loadCity = true; // Default: Seoul City 3D photorealistic environment
+    bool loadParkour = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--fullscreen") startFullscreen = true;
         if (std::string(argv[i]) == "--no-aion") useAionLink = false;
+        if (std::string(argv[i]) == "--no-city" || std::string(argv[i]) == "--bare") loadCity = false;
         if (std::string(argv[i]) == "--seoul" || std::string(argv[i]) == "--city") loadCity = true;
+        if (std::string(argv[i]) == "--parkour") loadParkour = true;
         if (std::string(argv[i]) == "--benchmark-headless") {
             headless = true;
         } else if (std::string(argv[i]) == "--editor") {
@@ -93,29 +96,31 @@ int main(int argc, char* argv[]) {
     floorRenderer.material.roughness = 0.55f;
     engine.world.meshRenderers[floorEntity] = floorRenderer;
 
-    // 2b. Obstacle Platforms
+    // 2b. Optional Obstacle Platforms (only when requested or in bare mode)
     std::vector<Surreal::ObstacleBox> obstacles;
-    obstacles.emplace_back(Surreal::Vec3(-1.8f, 0.25f, -1.8f), Surreal::Vec3(0.9f, 0.25f, 0.9f), "Platform_Low", Surreal::ColorRGB(0.0f, 0.95f, 0.85f));
-    obstacles.emplace_back(Surreal::Vec3(0.0f, 0.475f, -3.4f), Surreal::Vec3(1.1f, 0.475f, 1.1f), "Platform_Mid", Surreal::ColorRGB(1.0f, 0.15f, 0.65f));
-    obstacles.emplace_back(Surreal::Vec3(2.0f, 0.70f, -1.8f), Surreal::Vec3(0.9f, 0.70f, 0.9f), "Platform_High", Surreal::ColorRGB(1.0f, 0.85f, 0.2f));
-    obstacles.emplace_back(Surreal::Vec3(-0.8f, 0.925f, -5.2f), Surreal::Vec3(1.0f, 0.925f, 1.0f), "Platform_Apex", Surreal::ColorRGB(0.3f, 0.65f, 1.0f));
-
-    // Register platforms in world ECS
     std::vector<Surreal::EntityID> platformEntities;
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-        const auto& obs = obstacles[i];
-        Surreal::EntityID platEntity = engine.world.CreateEntity(obs.name);
-        platformEntities.push_back(platEntity);
 
-        Surreal::TransformComponent& pt = engine.world.transforms[platEntity];
-        pt.position = obs.aabb.Center();
+    if (loadParkour || !loadCity) {
+        obstacles.emplace_back(Surreal::Vec3(-1.8f, 0.25f, -1.8f), Surreal::Vec3(0.9f, 0.25f, 0.9f), "Platform_Low", Surreal::ColorRGB(0.0f, 0.95f, 0.85f));
+        obstacles.emplace_back(Surreal::Vec3(0.0f, 0.475f, -3.4f), Surreal::Vec3(1.1f, 0.475f, 1.1f), "Platform_Mid", Surreal::ColorRGB(1.0f, 0.15f, 0.65f));
+        obstacles.emplace_back(Surreal::Vec3(2.0f, 0.70f, -1.8f), Surreal::Vec3(0.9f, 0.70f, 0.9f), "Platform_High", Surreal::ColorRGB(1.0f, 0.85f, 0.2f));
+        obstacles.emplace_back(Surreal::Vec3(-0.8f, 0.925f, -5.2f), Surreal::Vec3(1.0f, 0.925f, 1.0f), "Platform_Apex", Surreal::ColorRGB(0.3f, 0.65f, 1.0f));
 
-        Surreal::MeshRendererComponent platRenderer;
-        platRenderer.mesh = Surreal::SurrealTerrainBuilder::CreateBox(obs.aabb.Extents() * 2.0f, obs.color);
-        platRenderer.material.albedo = obs.color;
-        platRenderer.material.metallic = 0.35f;
-        platRenderer.material.roughness = 0.40f;
-        engine.world.meshRenderers[platEntity] = platRenderer;
+        for (size_t i = 0; i < obstacles.size(); ++i) {
+            const auto& obs = obstacles[i];
+            Surreal::EntityID platEntity = engine.world.CreateEntity(obs.name);
+            platformEntities.push_back(platEntity);
+
+            Surreal::TransformComponent& pt = engine.world.transforms[platEntity];
+            pt.position = obs.aabb.Center();
+
+            Surreal::MeshRendererComponent platRenderer;
+            platRenderer.mesh = Surreal::SurrealTerrainBuilder::CreateBox(obs.aabb.Extents() * 2.0f, obs.color);
+            platRenderer.material.albedo = obs.color;
+            platRenderer.material.metallic = 0.35f;
+            platRenderer.material.roughness = 0.40f;
+            engine.world.meshRenderers[platEntity] = platRenderer;
+        }
     }
 
     // 3. Load 3D Skeletal Avatar Character
@@ -225,7 +230,7 @@ int main(int argc, char* argv[]) {
             std::cout << "[✓] Seoul City 3D Environment Spawned into Live Scene!\n";
         }
     }
-    editor.selectedIndex = 2; // Default select Platform_Low
+    editor.selectedIndex = static_cast<int>(editor.entities.size() - 1);
 
     // 5. Initialize Camera Controllers
     Surreal::InteractiveCameraController playCamera;

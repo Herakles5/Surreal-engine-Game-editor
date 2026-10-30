@@ -517,12 +517,12 @@ public:
         if (!ent || ent->isStaticTerrain || ent->isCharacter) return;
 
         ent->scale = ent->scale * factor;
-        ent->scale.x = std::max(0.2f, ent->scale.x);
-        ent->scale.y = std::max(0.1f, ent->scale.y);
-        ent->scale.z = std::max(0.2f, ent->scale.z);
+        ent->scale.x = std::max(0.01f, ent->scale.x);
+        ent->scale.y = std::max(0.01f, ent->scale.y);
+        ent->scale.z = std::max(0.01f, ent->scale.z);
 
-        if (world.meshRenderers.find(ent->id) != world.meshRenderers.end()) {
-            world.meshRenderers[ent->id].mesh = SurrealTerrainBuilder::CreateBox(ent->scale, ent->color);
+        if (world.transforms.find(ent->id) != world.transforms.end()) {
+            world.transforms[ent->id].scale = ent->scale;
         }
 
         SyncObstacles(obstacles);
@@ -546,7 +546,6 @@ public:
         ent->color = newColor;
         if (world.meshRenderers.find(ent->id) != world.meshRenderers.end()) {
             world.meshRenderers[ent->id].material.albedo = ent->color;
-            world.meshRenderers[ent->id].mesh = SurrealTerrainBuilder::CreateBox(ent->scale, ent->color);
         }
 
         SyncObstacles(obstacles);
