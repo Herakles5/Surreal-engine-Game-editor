@@ -67,7 +67,7 @@ static bool SetPlayerAvatar(
     character.activeDeformedMesh->CalculateBounds();
     float height = character.activeDeformedMesh->worldBounds.max.y - character.activeDeformedMesh->worldBounds.min.y;
     float scaleFactor = 1.0f;
-    if (height > 0.05f) {
+    if (height > 0.0001f) {
         scaleFactor = 1.80f / height;
     }
 

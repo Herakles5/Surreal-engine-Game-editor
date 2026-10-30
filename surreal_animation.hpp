@@ -98,6 +98,7 @@ struct SkeletonJoint {
     std::string name;
     int parentIndex;
     Mat4 inverseBindMatrix;
+    bool hasExplicitMatrix = false;
 
     // Current local TRS
     Vec3 localTranslation;
@@ -110,18 +111,21 @@ struct SkeletonJoint {
     Vec3 baseScale;
 
     // Computed world matrix & final skin matrix
+    Mat4 localMatrix;
     Mat4 globalMatrix;
     Mat4 skinMatrix; // globalMatrix * inverseBindMatrix
 
     SkeletonJoint()
         : parentIndex(-1),
           inverseBindMatrix(Mat4::Identity()),
+          hasExplicitMatrix(false),
           localTranslation(0, 0, 0),
           localRotation(0, 0, 0, 1.0f),
           localScale(1.0f, 1.0f, 1.0f),
           baseTranslation(0, 0, 0),
           baseRotation(0, 0, 0, 1.0f),
           baseScale(1.0f, 1.0f, 1.0f),
+          localMatrix(Mat4::Identity()),
           globalMatrix(Mat4::Identity()),
           skinMatrix(Mat4::Identity()) {}
 };
@@ -153,7 +157,10 @@ struct AnimationClip {
  */
 class SkeletalMeshInstance {
 public:
-    std::vector<SkeletonJoint> joints;
+    std::vector<SkeletonJoint> joints; // All glTF scene nodes
+    std::vector<int> skinJointNodeIndices; // Mapping from skin joint index to joints[]
+    std::vector<Mat4> skinJointIBMs; // Inverse bind matrices per skin joint
+    std::vector<Mat4> skinMatrices; // Evaluated skin matrices per skin joint
     std::vector<AnimationClip> clips;
     std::vector<SkinnedVertex3D> bindVertices;
     std::shared_ptr<SurrealMesh> activeDeformedMesh;
@@ -226,10 +233,13 @@ public:
 
                             if (chan.target == ChannelTarget::TRANSLATION && k < chan.vecValues.size() - 1) {
                                 joint.localTranslation = Lerp(chan.vecValues[k], chan.vecValues[k + 1], factor);
+                                joint.hasExplicitMatrix = false;
                             } else if (chan.target == ChannelTarget::ROTATION && k < chan.quatValues.size() - 1) {
                                 joint.localRotation = Slerp(chan.quatValues[k], chan.quatValues[k + 1], factor);
+                                joint.hasExplicitMatrix = false;
                             } else if (chan.target == ChannelTarget::SCALE && k < chan.vecValues.size() - 1) {
                                 joint.localScale = Lerp(chan.vecValues[k], chan.vecValues[k + 1], factor);
+                                joint.hasExplicitMatrix = false;
                             }
                             break;
                         }
@@ -238,16 +248,47 @@ public:
             }
         }
 
-        // 3. Forward Kinematics: Update Global Joint Transforms
-        for (size_t i = 0; i < joints.size(); ++i) {
-            if (joints[i].parentIndex == -1) {
-                UpdateJointHierarchy(static_cast<int>(i), Mat4::Identity());
+        // 3. Forward Kinematics: Update Local & Global Joint Transforms (memoized O(N) evaluation)
+        for (auto& j : joints) {
+            if (!j.hasExplicitMatrix) {
+                j.localMatrix = Mat4::Translation(j.localTranslation) *
+                                Mat4::FromQuat(j.localRotation) *
+                                Mat4::Scaling(j.localScale);
             }
         }
 
-        // 4. Compute Joint Matrix Palette: SkinMatrix = Global * InverseBind
-        for (auto& j : joints) {
-            j.skinMatrix = j.globalMatrix * j.inverseBindMatrix;
+        std::vector<bool> evalDone(joints.size(), false);
+        auto evalGlobal = [&](auto& self, int idx) -> void {
+            if (evalDone[idx]) return;
+            SkeletonJoint& j = joints[idx];
+            if (j.parentIndex >= 0 && j.parentIndex < (int)joints.size()) {
+                self(self, j.parentIndex);
+                j.globalMatrix = joints[j.parentIndex].globalMatrix * j.localMatrix;
+            } else {
+                j.globalMatrix = j.localMatrix;
+            }
+            evalDone[idx] = true;
+        };
+        for (size_t i = 0; i < joints.size(); ++i) {
+            evalGlobal(evalGlobal, static_cast<int>(i));
+        }
+
+        // 4. Compute Joint Matrix Palette
+        if (!skinJointNodeIndices.empty()) {
+            skinMatrices.resize(skinJointNodeIndices.size());
+            for (size_t s = 0; s < skinJointNodeIndices.size(); ++s) {
+                int nodeIdx = skinJointNodeIndices[s];
+                if (nodeIdx >= 0 && nodeIdx < (int)joints.size()) {
+                    skinMatrices[s] = joints[nodeIdx].globalMatrix * skinJointIBMs[s];
+                    joints[nodeIdx].skinMatrix = skinMatrices[s];
+                }
+            }
+        } else {
+            skinMatrices.resize(joints.size());
+            for (size_t i = 0; i < joints.size(); ++i) {
+                joints[i].skinMatrix = joints[i].globalMatrix * joints[i].inverseBindMatrix;
+                skinMatrices[i] = joints[i].skinMatrix;
+            }
         }
 
         // 5. Linear Blend Skinning (LBS) on Mesh Vertices
@@ -255,23 +296,6 @@ public:
     }
 
 private:
-    void UpdateJointHierarchy(int jointIdx, const Mat4& parentMat) {
-        if (jointIdx < 0 || jointIdx >= (int)joints.size()) return;
-
-        SkeletonJoint& j = joints[jointIdx];
-        Mat4 localMat = Mat4::Translation(j.localTranslation) *
-                        Mat4::FromQuat(j.localRotation) *
-                        Mat4::Scaling(j.localScale);
-
-        j.globalMatrix = parentMat * localMat;
-
-        for (size_t i = 0; i < joints.size(); ++i) {
-            if (joints[i].parentIndex == jointIdx) {
-                UpdateJointHierarchy(static_cast<int>(i), j.globalMatrix);
-            }
-        }
-    }
-
     void DeformMesh() {
         if (!activeDeformedMesh) return;
         const size_t vertCount = bindVertices.size();
@@ -279,41 +303,29 @@ private:
             activeDeformedMesh->vertices.resize(vertCount);
         }
 
-        // Calibrate foot base offset once at initialization & auto-detect Z-up vs Y-up coordinate spaces
+        const size_t numSkinMatrices = skinMatrices.size();
+        if (numSkinMatrices == 0) return;
+
+        // Calibrate foot base offset once at initialization to place character feet precisely on Y=0
         if (!hasFootBaseOffset) {
-            float minZ = 1e9f, maxZ = -1e9f;
-            float minY = 1e9f, maxY = -1e9f;
-
-            for (size_t i = 0; i < vertCount; ++i) {
-                const SkinnedVertex3D& b = bindVertices[i];
-                minZ = std::min(minZ, b.position.z); maxZ = std::max(maxZ, b.position.z);
-                minY = std::min(minY, b.position.y); maxY = std::max(maxY, b.position.y);
-            }
-
-            // If depth Z extent is significantly larger than height Y, model was exported in Blender Z-up space (e.g. Mia)
-            isZUpModel = ((maxZ - minZ) > (maxY - minY) * 1.25f);
-
-            float minGround = 1e9f;
+            float minGroundY = 1e9f;
             for (size_t i = 0; i < vertCount; ++i) {
                 const SkinnedVertex3D& b = bindVertices[i];
                 Vec3 skinnedPos(0, 0, 0);
                 for (int w = 0; w < 4; ++w) {
                     float weight = b.weights[w];
-                    if (weight > 0.0001f && b.joints[w] < joints.size()) {
-                        const Mat4& skinM = joints[b.joints[w]].skinMatrix;
+                    if (weight > 0.0001f && b.joints[w] < numSkinMatrices) {
+                        const Mat4& skinM = skinMatrices[b.joints[w]];
                         skinnedPos = skinnedPos + (skinM.TransformPoint(b.position) * weight);
                     }
                 }
-                float groundAxis = isZUpModel ? skinnedPos.z : skinnedPos.y;
-                if (groundAxis < minGround) minGround = groundAxis;
+                if (skinnedPos.y < minGroundY) minGroundY = skinnedPos.y;
             }
-            footBaseOffset = minGround;
+            footBaseOffset = minGroundY;
             hasFootBaseOffset = true;
         }
 
         const float footOffset = footBaseOffset;
-        const bool zUp = isZUpModel;
-        const size_t numJoints = joints.size();
 
         // Multi-threaded Linear Blend Skinning (LBS) via OpenMP
         #pragma omp parallel for schedule(static)
@@ -326,39 +338,16 @@ private:
                 float weight = b.weights[w];
                 if (weight > 0.0001f) {
                     uint16_t jIdx = b.joints[w];
-                    if (jIdx < numJoints) {
-                        const Mat4& skinM = joints[jIdx].skinMatrix;
+                    if (jIdx < numSkinMatrices) {
+                        const Mat4& skinM = skinMatrices[jIdx];
                         skinnedPos = skinnedPos + (skinM.TransformPoint(b.position) * weight);
                         skinnedNorm = skinnedNorm + (skinM.TransformDirection(b.normal) * weight);
                     }
                 }
             }
 
-            float rx, ry, rz;
-            float rnx, rny, rnz;
-
-            if (zUp) {
-                // Blender Z-up to standard Y-up conversion (e.g. Mia)
-                rx = skinnedPos.x;
-                ry = skinnedPos.z - footOffset;
-                rz = -skinnedPos.y;
-
-                rnx = skinnedNorm.x;
-                rny = skinnedNorm.z;
-                rnz = -skinnedNorm.y;
-            } else {
-                // Standard glTF Y-up coordinates (e.g. Wednesday, Miku, Stormtrooper, Dancers)
-                rx = skinnedPos.x;
-                ry = skinnedPos.y - footOffset;
-                rz = skinnedPos.z;
-
-                rnx = skinnedNorm.x;
-                rny = skinnedNorm.y;
-                rnz = skinnedNorm.z;
-            }
-
-            activeDeformedMesh->vertices[i].position = Vec3(rx, ry, rz);
-            activeDeformedMesh->vertices[i].normal = Vec3(rnx, rny, rnz).Normalized();
+            activeDeformedMesh->vertices[i].position = Vec3(skinnedPos.x, skinnedPos.y - footOffset, skinnedPos.z);
+            activeDeformedMesh->vertices[i].normal = skinnedNorm.Normalized();
             activeDeformedMesh->vertices[i].u = b.u;
             activeDeformedMesh->vertices[i].v = b.v;
             activeDeformedMesh->vertices[i].color = b.color;
@@ -398,58 +387,58 @@ public:
             return false;
         }
 
-        // 1. Parse Skin Joints & Inverse Bind Matrices
-        if (data->skins_count > 0) {
-            const cgltf_skin& skin = data->skins[0];
-            outInstance.joints.resize(skin.joints_count);
+        // 1. Parse All glTF Scene Graph Nodes into Joint Rig
+        outInstance.joints.resize(data->nodes_count);
+        for (cgltf_size i = 0; i < data->nodes_count; ++i) {
+            cgltf_node* cn = &data->nodes[i];
+            SkeletonJoint& joint = outInstance.joints[i];
+            joint.name = cn->name ? cn->name : ("Node_" + std::to_string(i));
+            joint.parentIndex = cn->parent ? static_cast<int>(cn->parent - data->nodes) : -1;
 
-            for (cgltf_size j = 0; j < skin.joints_count; ++j) {
-                cgltf_node* node = skin.joints[j];
-                SkeletonJoint& joint = outInstance.joints[j];
-                joint.name = node->name ? node->name : ("Joint_" + std::to_string(j));
-
-                // Find parent index
-                joint.parentIndex = -1;
-                for (cgltf_size p = 0; p < skin.joints_count; ++p) {
-                    cgltf_node* pNode = skin.joints[p];
-                    for (cgltf_size c = 0; c < pNode->children_count; ++c) {
-                        if (pNode->children[c] == node) {
-                            joint.parentIndex = static_cast<int>(p);
-                            break;
-                        }
+            if (cn->has_matrix) {
+                float lm[16];
+                cgltf_node_transform_local(cn, lm);
+                for (int r = 0; r < 4; ++r) {
+                    for (int c = 0; c < 4; ++c) {
+                        joint.localMatrix.m[r][c] = lm[c * 4 + r];
                     }
-                    if (joint.parentIndex != -1) break;
                 }
-
-                // Base TRS
-                if (node->has_translation) {
-                    joint.baseTranslation = Vec3(node->translation[0], node->translation[1], node->translation[2]);
-                }
-                if (node->has_rotation) {
-                    joint.baseRotation = Quat(node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]);
-                }
-                if (node->has_scale) {
-                    joint.baseScale = Vec3(node->scale[0], node->scale[1], node->scale[2]);
-                }
-
+                joint.hasExplicitMatrix = true;
+            } else {
+                if (cn->has_translation) joint.baseTranslation = Vec3(cn->translation[0], cn->translation[1], cn->translation[2]);
+                if (cn->has_rotation) joint.baseRotation = Quat(cn->rotation[0], cn->rotation[1], cn->rotation[2], cn->rotation[3]);
+                if (cn->has_scale) joint.baseScale = Vec3(cn->scale[0], cn->scale[1], cn->scale[2]);
                 joint.localTranslation = joint.baseTranslation;
                 joint.localRotation = joint.baseRotation;
                 joint.localScale = joint.baseScale;
+                joint.localMatrix = Mat4::Translation(joint.localTranslation) *
+                                    Mat4::FromQuat(joint.localRotation) *
+                                    Mat4::Scaling(joint.localScale);
+                joint.hasExplicitMatrix = false;
+            }
+        }
 
-                // Read inverse bind matrix (convert glTF column-major to our row-major)
+        // 2. Parse Skin Joint Mapping & Inverse Bind Matrices
+        if (data->skins_count > 0) {
+            const cgltf_skin& skin = data->skins[0];
+            outInstance.skinJointNodeIndices.resize(skin.joints_count);
+            outInstance.skinJointIBMs.resize(skin.joints_count, Mat4::Identity());
+
+            for (cgltf_size j = 0; j < skin.joints_count; ++j) {
+                outInstance.skinJointNodeIndices[j] = static_cast<int>(skin.joints[j] - data->nodes);
                 if (skin.inverse_bind_matrices) {
                     float ibm[16];
                     cgltf_accessor_read_float(skin.inverse_bind_matrices, j, ibm, 16);
                     for (int r = 0; r < 4; ++r) {
                         for (int c = 0; c < 4; ++c) {
-                            joint.inverseBindMatrix.m[r][c] = ibm[c * 4 + r];
+                            outInstance.skinJointIBMs[j].m[r][c] = ibm[c * 4 + r];
                         }
                     }
                 }
             }
         }
 
-        // 2. Parse Animation Clips & Channels
+        // 3. Parse Animation Clips & Channels (every channel connects directly to scene node)
         for (cgltf_size a = 0; a < data->animations_count; ++a) {
             const cgltf_animation& gAnim = data->animations[a];
             AnimationClip clip;
@@ -459,22 +448,12 @@ public:
             for (cgltf_size c = 0; c < gAnim.channels_count; ++c) {
                 const cgltf_animation_channel& gChan = gAnim.channels[c];
                 cgltf_node* targetNode = gChan.target_node;
-
-                // Match node to joint index
-                int jointIdx = -1;
-                if (data->skins_count > 0) {
-                    for (cgltf_size j = 0; j < data->skins[0].joints_count; ++j) {
-                        if (data->skins[0].joints[j] == targetNode) {
-                            jointIdx = static_cast<int>(j);
-                            break;
-                        }
-                    }
-                }
-
-                if (jointIdx == -1) continue;
+                if (!targetNode) continue;
+                int nodeIdx = static_cast<int>(targetNode - data->nodes);
+                if (nodeIdx < 0 || nodeIdx >= (int)outInstance.joints.size()) continue;
 
                 AnimationChannel chan;
-                chan.jointIndex = jointIdx;
+                chan.jointIndex = nodeIdx;
 
                 if (gChan.target_path == cgltf_animation_path_type_translation) {
                     chan.target = ChannelTarget::TRANSLATION;

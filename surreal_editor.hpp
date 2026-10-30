@@ -446,7 +446,7 @@ public:
             } else if (IsDanceModel(file.filename) || IsAvatarModel(file.filename)) {
                 // Humanoid characters: normalize height to ~1.80m tall
                 float charHeight = placementMesh->worldBounds.max.y - placementMesh->worldBounds.min.y;
-                if (charHeight > 0.05f) {
+                if (charHeight > 0.0001f) {
                     scaleFactor = 1.80f / charHeight;
                 } else {
                     scaleFactor = 1.8f / maxDim;
