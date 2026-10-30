@@ -563,6 +563,17 @@ public:
                     }
                     if (!posAcc) continue;
 
+                    // Skip invisible volumetric helper / fog meshes (e.g. fog_88 with alpha=0)
+                    if (prim.material && prim.material->has_pbr_metallic_roughness) {
+                        const auto& pbr = prim.material->pbr_metallic_roughness;
+                        if (pbr.base_color_factor[3] < 0.05f && (!pbr.base_color_texture.texture || !pbr.base_color_texture.texture->image)) {
+                            continue; // Skip invisible collision or fog mesh
+                        }
+                    }
+                    if (node->name && std::string(node->name).find("fog") != std::string::npos) {
+                        continue;
+                    }
+
                     SubMesh sub;
                     sub.indexOffset = static_cast<uint32_t>(outInstance.activeDeformedMesh->indices.size());
 
@@ -589,6 +600,28 @@ public:
                                 uvOffset[0] = pbr.base_color_texture.transform.offset[0];
                                 uvOffset[1] = pbr.base_color_texture.transform.offset[1];
                             }
+                        }
+                    }
+
+                    // If no texture is present, calibrate architectural facade tones instead of flat white
+                    if (!sub.texRGBA && prim.material && prim.material->name) {
+                        std::string matName = prim.material->name;
+                        for (char& c : matName) c = tolower(c);
+                        if (matName.find("wall") != std::string::npos) {
+                            sub.albedo = ColorRGB(0.62f, 0.65f, 0.68f); // Urban concrete facade
+                            sub.roughness = 0.82f;
+                        } else if (matName.find("tiles2") != std::string::npos) {
+                            sub.albedo = ColorRGB(0.38f, 0.40f, 0.44f); // Dark trim tiles
+                            sub.roughness = 0.55f;
+                        } else if (matName.find("tiles") != std::string::npos) {
+                            sub.albedo = ColorRGB(0.70f, 0.72f, 0.75f); // Ceramic building tiles
+                            sub.roughness = 0.60f;
+                        } else if (matName.find("roof") != std::string::npos) {
+                            sub.albedo = ColorRGB(0.18f, 0.20f, 0.23f); // Rooftop tar/gravel membrane
+                            sub.roughness = 0.90f;
+                        } else if (matName.find("hous") != std::string::npos) {
+                            sub.albedo = ColorRGB(0.58f, 0.60f, 0.64f); // Facade concrete
+                            sub.roughness = 0.75f;
                         }
                     }
 
@@ -698,6 +731,9 @@ public:
 
                 if (prim.material && prim.material->has_pbr_metallic_roughness) {
                     const auto& pbr = prim.material->pbr_metallic_roughness;
+                    if (pbr.base_color_factor[3] < 0.05f && (!pbr.base_color_texture.texture || !pbr.base_color_texture.texture->image)) {
+                        continue; // Skip invisible volume / fog helper
+                    }
                     baseFactor[0] = pbr.base_color_factor[0];
                     baseFactor[1] = pbr.base_color_factor[1];
                     baseFactor[2] = pbr.base_color_factor[2];

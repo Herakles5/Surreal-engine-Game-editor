@@ -51,6 +51,7 @@ public:
     // OpenGL Shaders & Resources
     GLuint pbrProg;
     GLuint quadProg;
+    GLuint skyProg;
     GLuint quadVAO, quadVBO;
     GLuint screenTex;
     GLuint hudTex;
@@ -68,6 +69,15 @@ public:
     GLint uAlbedoMapLoc;
     GLint uHasTextureLoc;
 
+    // Sky Dome Uniform Locations
+    GLint uSkyInvVPLoc;
+    GLint uSkyZenithLoc;
+    GLint uSkyHorizonLoc;
+    GLint uSkyGroundLoc;
+    GLint uSkySunDirLoc;
+    GLint uSkySunColLoc;
+    GLint uSkyIsNightLoc;
+
     std::string glVendor;
     std::string glRenderer;
     std::string glVersion;
@@ -81,14 +91,18 @@ public:
           isGLInitialized(false),
           screenWidth(960),
           screenHeight(640),
-          pbrProg(0), quadProg(0),
+          pbrProg(0), quadProg(0), skyProg(0),
           quadVAO(0), quadVBO(0),
           screenTex(0), hudTex(0),
           uMVPLoc(-1), uModelLoc(-1),
           uSunDirLoc(-1), uSunColorLoc(-1),
           uAmbientColorLoc(-1), uCamPosLoc(-1),
           uAlbedoLoc(-1), uMetallicLoc(-1),
-          uRoughnessLoc(-1) {}
+          uRoughnessLoc(-1),
+          uSkyInvVPLoc(-1), uSkyZenithLoc(-1),
+          uSkyHorizonLoc(-1), uSkyGroundLoc(-1),
+          uSkySunDirLoc(-1), uSkySunColLoc(-1),
+          uSkyIsNightLoc(-1) {}
 
     ~SurrealHybridRenderer() {
         Cleanup();
@@ -332,6 +346,42 @@ public:
         glDisable(GL_BLEND);
     }
 
+    /**
+     * Render Celestial Sky Dome (Deep atmosphere, horizon gradient, sun/moon disc & stars)
+     * Reconstructs world-space rays using the inverse View-Projection matrix.
+     */
+    void RenderSky(
+        const Mat4& invViewProj,
+        const ColorRGB& zenithCol,
+        const ColorRGB& horizonCol,
+        const ColorRGB& groundCol,
+        const Vec3& sunDir,
+        const ColorRGB& sunCol,
+        bool isNight)
+    {
+        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || skyProg == 0) return;
+
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glUseProgram(skyProg);
+
+        glUniformMatrix4fv(uSkyInvVPLoc, 1, GL_TRUE, &invViewProj.m[0][0]);
+        glUniform3f(uSkyZenithLoc, zenithCol.r, zenithCol.g, zenithCol.b);
+        glUniform3f(uSkyHorizonLoc, horizonCol.r, horizonCol.g, horizonCol.b);
+        glUniform3f(uSkyGroundLoc, groundCol.r, groundCol.g, groundCol.b);
+        glUniform3f(uSkySunDirLoc, sunDir.x, sunDir.y, sunDir.z);
+        glUniform3f(uSkySunColLoc, sunCol.r, sunCol.g, sunCol.b);
+        glUniform1f(uSkyIsNightLoc, isNight ? 1.0f : 0.0f);
+
+        glBindVertexArray(quadVAO);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindVertexArray(0);
+
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+    }
+
     void Present() {
         if (isGLInitialized && window) {
             SDL_GL_SwapWindow(window);
@@ -352,6 +402,7 @@ public:
         if (quadVBO) glDeleteBuffers(1, &quadVBO);
         if (pbrProg) glDeleteProgram(pbrProg);
         if (quadProg) glDeleteProgram(quadProg);
+        if (skyProg) glDeleteProgram(skyProg);
 
         if (glContext) {
             SDL_GL_DeleteContext(glContext);
@@ -488,9 +539,9 @@ void main() {
 
     // 3. Atmospheric Distance Depth Fog (Extended range for expansive metropolis view)
     float dist = length(uCamPos - vFragPos);
-    float fogFactor = clamp((dist - 25.0) / 160.0, 0.0, 1.0);
+    float fogFactor = clamp((dist - 35.0) / 185.0, 0.0, 1.0);
     fogFactor = smoothstep(0.0, 1.0, fogFactor);
-    vec3 fogColor = uAmbientColor * 0.55 + vec3(0.015, 0.02, 0.04);
+    vec3 fogColor = uAmbientColor * 0.40 + vec3(0.01, 0.015, 0.03);
     color = mix(color, fogColor, fogFactor);
 
     // 4. ACES Filmic Tone Mapping (professional cinematic contrast)
@@ -564,6 +615,96 @@ void main() {
 
         glDeleteShader(qvs);
         glDeleteShader(qfs);
+
+        // 4. Celestial Sky Dome Shader (Infinite horizon, zenith gradient, sun/moon disc & stars)
+        const char* skyVS = R"(
+#version 330 core
+layout (location = 0) in vec2 aPos;
+out vec2 vNDC;
+void main() {
+    vNDC = aPos;
+    gl_Position = vec4(aPos, 0.99999, 1.0);
+}
+)";
+
+        const char* skyFS = R"(
+#version 330 core
+out vec4 FragColor;
+in vec2 vNDC;
+
+uniform mat4 uInvViewProj;
+uniform vec3 uZenithColor;
+uniform vec3 uHorizonColor;
+uniform vec3 uGroundColor;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform float uIsNight;
+
+float hash(vec3 p) {
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+void main() {
+    vec4 clip = vec4(vNDC, 1.0, 1.0);
+    vec4 world = uInvViewProj * clip;
+    vec3 ray = normalize(world.xyz / world.w);
+
+    vec3 sky;
+    if (ray.y >= 0.0) {
+        float t = pow(ray.y, 0.55);
+        sky = mix(uHorizonColor, uZenithColor, t);
+
+        // Sun / Moon Disc & Atmospheric Corona
+        vec3 sDir = normalize(uSunDir);
+        float sunDot = max(dot(ray, sDir), 0.0);
+        float sunDisc = pow(sunDot, 320.0) * 1.8;
+        float sunGlow = pow(sunDot, 14.0) * 0.35;
+        sky += (sunDisc + sunGlow) * uSunColor;
+
+        // Twinkling stars in night mode
+        if (uIsNight > 0.5) {
+            vec3 starGrid = floor(ray * 520.0);
+            float h = hash(starGrid);
+            if (h > 0.991) {
+                float starBright = (h - 0.991) / 0.009;
+                sky += vec3(starBright * 0.85, starBright * 0.92, starBright * 1.0);
+            }
+        }
+    } else {
+        float t = clamp(-ray.y * 3.5, 0.0, 1.0);
+        sky = mix(uHorizonColor, uGroundColor, t);
+    }
+
+    // ACES Filmic Tone Mapping & Gamma Correction
+    vec3 a = sky * (2.51 * sky + vec3(0.03));
+    vec3 b = sky * (2.43 * sky + vec3(0.59)) + vec3(0.14);
+    sky = clamp(a / b, 0.0, 1.0);
+    sky = pow(sky, vec3(1.0 / 2.2));
+
+    FragColor = vec4(sky, 1.0);
+}
+)";
+
+        GLuint svs = CompileShader(GL_VERTEX_SHADER, skyVS);
+        GLuint sfs = CompileShader(GL_FRAGMENT_SHADER, skyFS);
+        if (svs && sfs) {
+            skyProg = glCreateProgram();
+            glAttachShader(skyProg, svs);
+            glAttachShader(skyProg, sfs);
+            glLinkProgram(skyProg);
+            glDeleteShader(svs);
+            glDeleteShader(sfs);
+
+            uSkyInvVPLoc = glGetUniformLocation(skyProg, "uInvViewProj");
+            uSkyZenithLoc = glGetUniformLocation(skyProg, "uZenithColor");
+            uSkyHorizonLoc = glGetUniformLocation(skyProg, "uHorizonColor");
+            uSkyGroundLoc = glGetUniformLocation(skyProg, "uGroundColor");
+            uSkySunDirLoc = glGetUniformLocation(skyProg, "uSunDir");
+            uSkySunColLoc = glGetUniformLocation(skyProg, "uSunColor");
+            uSkyIsNightLoc = glGetUniformLocation(skyProg, "uIsNight");
+        }
 
         return true;
     }

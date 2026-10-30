@@ -32,10 +32,10 @@ struct ObstacleBox {
 class SurrealTerrainBuilder {
 public:
     /**
-     * Create Massive Metropolis Ground Floor (180m x 180m = 32,400 m²)
+     * Create Massive Metropolis Ground Floor (220m x 220m = 48,400 m²)
      * Expansive asphalt street network with lane markings & cyber-grid accents.
      */
-    static std::shared_ptr<SurrealMesh> CreateMetropolisGround(float size = 180.0f, int divisions = 60) {
+    static std::shared_ptr<SurrealMesh> CreateMetropolisGround(float size = 220.0f, int divisions = 70) {
         auto mesh = std::make_shared<SurrealMesh>();
         float half = size * 0.5f;
         float step = size / static_cast<float>(divisions);
@@ -47,7 +47,7 @@ public:
                 float x1 = x0 + step;
                 float z1 = z0 + step;
 
-                // Center avenue is within |z| < 15 and |x| < 45
+                // Center avenue is within |z| < 18 and |x| < 55
                 bool isCoreAvenue = (std::abs(z0 + step * 0.5f) < 18.0f && std::abs(x0 + step * 0.5f) < 55.0f);
                 bool isRoadMarking = (isCoreAvenue && (std::abs(z0 + step * 0.5f) < 1.0f) && (x % 2 == 0));
                 bool isCrossroad = (std::abs(x0 + step * 0.5f) < 6.0f && std::abs(z0 + step * 0.5f) < 45.0f);
@@ -76,10 +76,10 @@ public:
                 }
 
                 uint32_t base = static_cast<uint32_t>(mesh->vertices.size());
-                mesh->vertices.push_back(Vertex3D(Vec3(x0, -0.005f, z0), Vec3(0, 1.0f, 0), x0 * 0.1f, z0 * 0.1f, col));
-                mesh->vertices.push_back(Vertex3D(Vec3(x1, -0.005f, z0), Vec3(0, 1.0f, 0), x1 * 0.1f, z0 * 0.1f, col));
-                mesh->vertices.push_back(Vertex3D(Vec3(x1, -0.005f, z1), Vec3(0, 1.0f, 0), x1 * 0.1f, z1 * 0.1f, col));
-                mesh->vertices.push_back(Vertex3D(Vec3(x0, -0.005f, z1), Vec3(0, 1.0f, 0), x0 * 0.1f, z1 * 0.1f, col));
+                mesh->vertices.push_back(Vertex3D(Vec3(x0, 0.0f, z0), Vec3(0, 1.0f, 0), x0 * 0.1f, z0 * 0.1f, col));
+                mesh->vertices.push_back(Vertex3D(Vec3(x1, 0.0f, z0), Vec3(0, 1.0f, 0), x1 * 0.1f, z0 * 0.1f, col));
+                mesh->vertices.push_back(Vertex3D(Vec3(x1, 0.0f, z1), Vec3(0, 1.0f, 0), x1 * 0.1f, z1 * 0.1f, col));
+                mesh->vertices.push_back(Vertex3D(Vec3(x0, 0.0f, z1), Vec3(0, 1.0f, 0), x0 * 0.1f, z1 * 0.1f, col));
 
                 mesh->indices.push_back(base + 0);
                 mesh->indices.push_back(base + 1);

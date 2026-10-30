@@ -163,14 +163,14 @@ int main(int argc, char* argv[]) {
     // 2. Build 3D Terrain & Obstacle Parkour Environment
     std::cout << "[*] Constructing 3D Cyberpunk Grid Terrain & Parkour Platforms...\n";
 
-    // 2a. Massive Metropolis Ground Floor (180m x 180m = 32,400 m² total surface area)
+    // 2a. Massive Metropolis Ground Floor (220m x 220m = 48,400 m² total surface area)
     Surreal::EntityID floorEntity = engine.world.CreateEntity("MetropolisGroundFloor");
     Surreal::TransformComponent& ft = engine.world.transforms[floorEntity];
-    ft.position = Surreal::Vec3(0, -0.015f, 0); // Foundation level seamlessly beneath street asphalt
+    ft.position = Surreal::Vec3(0, -0.005f, 0); // Foundation level seamlessly beneath street asphalt
     ft.scale = Surreal::Vec3(1.0f, 1.0f, 1.0f);
 
     Surreal::MeshRendererComponent floorRenderer;
-    floorRenderer.mesh = Surreal::SurrealTerrainBuilder::CreateMetropolisGround(180.0f, 60);
+    floorRenderer.mesh = Surreal::SurrealTerrainBuilder::CreateMetropolisGround(220.0f, 70);
     floorRenderer.material.albedo = Surreal::ColorRGB(1.0f, 1.0f, 1.0f);
     floorRenderer.material.metallic = 0.15f;
     floorRenderer.material.roughness = 0.65f;
@@ -249,7 +249,7 @@ int main(int argc, char* argv[]) {
     floorEd.id = floorEntity;
     floorEd.name = "MetropolisGroundFloor";
     floorEd.position = ft.position;
-    floorEd.scale = Surreal::Vec3(180.0f, 0.1f, 180.0f);
+    floorEd.scale = Surreal::Vec3(220.0f, 0.1f, 220.0f);
     floorEd.color = Surreal::ColorRGB(1.0f, 1.0f, 1.0f);
     floorEd.metallic = 0.15f;
     floorEd.roughness = 0.65f;
@@ -427,20 +427,54 @@ int main(int argc, char* argv[]) {
         Surreal::ColorRGB sunColor;
         float sunIntensity;
         Surreal::ColorRGB ambientColor;
-        Surreal::ColorRGB skyColor;
+        Surreal::ColorRGB zenithColor;
+        Surreal::ColorRGB horizonColor;
+        Surreal::ColorRGB groundColor;
+        bool isNight;
     };
 
     const AtmosphericProfile skyProfiles[4] = {
-        // 0: DAY - Clear Seoul daylight
-        {"Tag (Daylight)", Surreal::Vec3(0.45f, 0.82f, 0.35f).Normalized(), Surreal::ColorRGB(1.0f, 0.98f, 0.92f), 1.35f, Surreal::ColorRGB(0.42f, 0.44f, 0.50f), Surreal::ColorRGB(0.50f, 0.68f, 0.88f)},
-        // 1: SUNSET - Golden hour & magenta horizon
-        {"Sonnenuntergang (Sunset)", Surreal::Vec3(0.85f, 0.22f, 0.45f).Normalized(), Surreal::ColorRGB(1.25f, 0.55f, 0.22f), 1.20f, Surreal::ColorRGB(0.36f, 0.24f, 0.34f), Surreal::ColorRGB(0.78f, 0.34f, 0.22f)},
-        // 2: CYBERPUNK NIGHT - Midnight neon street life
-        {"Cyberpunk Nacht (Night)", Surreal::Vec3(-0.35f, 0.85f, -0.40f).Normalized(), Surreal::ColorRGB(0.35f, 0.50f, 0.85f), 0.75f, Surreal::ColorRGB(0.18f, 0.18f, 0.28f), Surreal::ColorRGB(0.015f, 0.02f, 0.05f)},
-        // 3: NEON DAWN - Violet morning mist
-        {"Neon Morgendaemmerung (Dawn)", Surreal::Vec3(-0.6f, 0.45f, 0.65f).Normalized(), Surreal::ColorRGB(0.95f, 0.55f, 0.80f), 1.05f, Surreal::ColorRGB(0.28f, 0.25f, 0.40f), Surreal::ColorRGB(0.22f, 0.14f, 0.32f)}
+        // 0: CYBERPUNK NIGHT - Midnight neon street life & starry celestial dome
+        {"Cyberpunk Nacht (Night)",
+         Surreal::Vec3(-0.35f, 0.85f, -0.40f).Normalized(),
+         Surreal::ColorRGB(0.45f, 0.65f, 1.0f), 0.85f,
+         Surreal::ColorRGB(0.12f, 0.14f, 0.22f),
+         Surreal::ColorRGB(0.005f, 0.008f, 0.020f),
+         Surreal::ColorRGB(0.04f, 0.08f, 0.20f),
+         Surreal::ColorRGB(0.015f, 0.02f, 0.035f),
+         true},
+
+        // 1: DAY - Clear Seoul daylight with deep azure zenith
+        {"Tag (Daylight)",
+         Surreal::Vec3(0.45f, 0.85f, 0.35f).Normalized(),
+         Surreal::ColorRGB(1.0f, 0.96f, 0.88f), 1.30f,
+         Surreal::ColorRGB(0.35f, 0.38f, 0.44f),
+         Surreal::ColorRGB(0.12f, 0.36f, 0.82f),
+         Surreal::ColorRGB(0.64f, 0.78f, 0.94f),
+         Surreal::ColorRGB(0.18f, 0.20f, 0.24f),
+         false},
+
+        // 2: SUNSET - Golden hour & blazing magenta horizon
+        {"Sonnenuntergang (Sunset)",
+         Surreal::Vec3(0.85f, 0.18f, 0.45f).Normalized(),
+         Surreal::ColorRGB(1.35f, 0.55f, 0.20f), 1.25f,
+         Surreal::ColorRGB(0.28f, 0.20f, 0.30f),
+         Surreal::ColorRGB(0.20f, 0.08f, 0.32f),
+         Surreal::ColorRGB(0.92f, 0.42f, 0.18f),
+         Surreal::ColorRGB(0.10f, 0.08f, 0.10f),
+         false},
+
+        // 3: NEON DAWN - Indigo morning mist & cyberpunk horizon glow
+        {"Neon Morgendaemmerung (Dawn)",
+         Surreal::Vec3(-0.6f, 0.40f, 0.65f).Normalized(),
+         Surreal::ColorRGB(0.95f, 0.60f, 0.85f), 1.05f,
+         Surreal::ColorRGB(0.22f, 0.20f, 0.32f),
+         Surreal::ColorRGB(0.08f, 0.06f, 0.22f),
+         Surreal::ColorRGB(0.55f, 0.24f, 0.45f),
+         Surreal::ColorRGB(0.06f, 0.06f, 0.09f),
+         false}
     };
-    int currentSkyProfile = 0; // Default to clear daylight, press [N] to toggle!
+    int currentSkyProfile = 0; // Default to immersive Cyberpunk Night!
 
     auto applySkyProfile = [&](int idx) {
         const auto& p = skyProfiles[idx % 4];
@@ -1057,7 +1091,8 @@ int main(int argc, char* argv[]) {
 
         if (hybridRenderer.backend == Surreal::RenderBackend::GPU_OPENGL && hybridRenderer.isGLInitialized) {
             // --- GPU HARDWARE OPENGL 4.6 PIPELINE ---
-            hybridRenderer.BeginFrame(skyProfiles[currentSkyProfile].skyColor);
+            const auto& curSky = skyProfiles[currentSkyProfile % 4];
+            hybridRenderer.BeginFrame(curSky.horizonColor);
             hybridRenderer.SetGlobalUniforms(
                 engine.world.sunLight.direction,
                 engine.world.sunLight.color * engine.world.sunLight.intensity,
@@ -1066,6 +1101,17 @@ int main(int argc, char* argv[]) {
             );
 
             Surreal::Mat4 vpMat = engine.GetProjectionMatrix() * engine.GetViewMatrix();
+
+            // Render Dynamic Celestial Sky Dome (Deep atmosphere, horizon gradient, sun/moon & stars)
+            hybridRenderer.RenderSky(
+                vpMat.Inversed(),
+                curSky.zenithColor,
+                curSky.horizonColor,
+                curSky.groundColor,
+                curSky.sunDir,
+                curSky.sunColor * curSky.sunIntensity,
+                curSky.isNight
+            );
 
             // Render all scene entities
             for (auto entityID : engine.world.entities) {

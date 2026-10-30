@@ -219,6 +219,52 @@ struct alignas(64) Mat4 {
             v.x * m[3][0] + v.y * m[3][1] + v.z * m[3][2] + v.w * m[3][3]
         );
     }
+
+    Mat4 Inversed() const {
+        Mat4 inv = Identity();
+        const float* a = &m[0][0];
+        float* o = &inv.m[0][0];
+
+        float s0 = a[0] * a[5] - a[4] * a[1];
+        float s1 = a[0] * a[6] - a[4] * a[2];
+        float s2 = a[0] * a[7] - a[4] * a[3];
+        float s3 = a[1] * a[6] - a[5] * a[2];
+        float s4 = a[1] * a[7] - a[5] * a[3];
+        float s5 = a[2] * a[7] - a[6] * a[3];
+
+        float c5 = a[10] * a[15] - a[14] * a[11];
+        float c4 = a[9] * a[15] - a[13] * a[11];
+        float c3 = a[9] * a[14] - a[13] * a[10];
+        float c2 = a[8] * a[15] - a[12] * a[11];
+        float c1 = a[8] * a[14] - a[12] * a[10];
+        float c0 = a[8] * a[13] - a[12] * a[9];
+
+        float det = s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0;
+        if (fabsf(det) < 1e-8f) return Identity();
+        float invDet = 1.0f / det;
+
+        o[0]  = ( a[5] * c5 - a[6] * c4 + a[7] * c3) * invDet;
+        o[1]  = (-a[1] * c5 + a[2] * c4 - a[3] * c3) * invDet;
+        o[2]  = ( a[13] * s5 - a[14] * s4 + a[15] * s3) * invDet;
+        o[3]  = (-a[9] * s5 + a[10] * s4 - a[11] * s3) * invDet;
+
+        o[4]  = (-a[4] * c5 + a[6] * c2 - a[7] * c1) * invDet;
+        o[5]  = ( a[0] * c5 - a[2] * c2 + a[3] * c1) * invDet;
+        o[6]  = (-a[12] * s5 + a[14] * s2 - a[15] * s1) * invDet;
+        o[7]  = ( a[8] * s5 - a[10] * s2 + a[11] * s1) * invDet;
+
+        o[8]  = ( a[4] * c4 - a[5] * c2 + a[7] * c0) * invDet;
+        o[9]  = (-a[0] * c4 + a[1] * c2 - a[3] * c0) * invDet;
+        o[10] = ( a[12] * s4 - a[13] * s2 + a[15] * s0) * invDet;
+        o[11] = (-a[8] * s4 + a[9] * s2 - a[11] * s0) * invDet;
+
+        o[12] = (-a[4] * c3 + a[5] * c1 - a[6] * c0) * invDet;
+        o[13] = ( a[0] * c3 - a[1] * c1 + a[2] * c0) * invDet;
+        o[14] = (-a[12] * s3 + a[13] * s1 - a[14] * s0) * invDet;
+        o[15] = ( a[8] * s3 - a[9] * s1 + a[10] * s0) * invDet;
+
+        return inv;
+    }
 };
 
 // Axis-Aligned Bounding Box (AABB)
