@@ -29,3 +29,12 @@ Thumbs.db
 # Exclude large binary dumps if any
 *.a3d
 *.iso
+
+# Local-only symlinks created by install_aion_avatars.sh and downloaded models
+assets/models/Aion_Avatar_*
+assets/models/*.zip
+assets/models/*.glb
+assets/models/*.gltf
+assets/models/source/
+assets/models/textures/
+assets/models/Seoul_City_*.glb

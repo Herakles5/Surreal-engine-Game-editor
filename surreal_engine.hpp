@@ -74,6 +74,21 @@ public:
         screenPitch = pitch;
     }
 
+    /**
+     * Live viewport resize (window resize / fullscreen toggle).
+     * Re-allocates the depth buffer; caller must re-attach its new framebuffer afterwards.
+     */
+    void Resize(uint32_t width, uint32_t height) {
+        if (width == 0 || height == 0) return;
+        if (width == screenWidth && height == screenHeight) return;
+        screenWidth = width;
+        screenHeight = height;
+        screenPitch = width * sizeof(uint32_t);
+        delete[] depthBuffer;
+        depthBuffer = new float[static_cast<size_t>(width) * height];
+        framebuffer = nullptr; // must be re-attached by the caller
+    }
+
     void Clear(uint32_t clearColor = 0xFF050811) {
         if (!framebuffer || !depthBuffer) return;
         #pragma omp parallel for schedule(static)

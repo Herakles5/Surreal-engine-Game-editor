@@ -160,7 +160,17 @@ public:
 
     static void DrawString(uint32_t* fb, int screenW, int screenH, int x, int y, const std::string& text, uint32_t color, int scale = 1) {
         int curX = x;
-        for (char c : text) {
+        for (size_t i = 0; i < text.size(); ++i) {
+            unsigned char uc = static_cast<unsigned char>(text[i]);
+            char c = static_cast<char>(uc);
+            if (uc >= 0x80) {
+                // UTF-8 multi-byte sequence -> exactly ONE glyph (font is ASCII-only)
+                size_t len = (uc >= 0xF0) ? 4 : (uc >= 0xE0) ? 3 : 2;
+                // Checkmark / heavy checkmark -> '+', everything else -> '*'
+                c = (uc == 0xE2 && i + 2 < text.size() &&
+                     static_cast<unsigned char>(text[i + 1]) == 0x9C) ? '+' : '*';
+                i += len - 1;
+            }
             DrawChar(fb, screenW, screenH, curX, y, c, color, scale);
             curX += 8 * scale;
         }
@@ -229,7 +239,8 @@ public:
         const std::string& animClipName, float animTime,
         float camDist, float camPitch, float camYaw,
         bool isBenchmarkRunning, int benchmarkProgressPercent,
-        const BenchmarkResults* benchResults = nullptr)
+        const BenchmarkResults* benchResults = nullptr,
+        int aionGeneration = 0, bool aionOnline = false)
     {
         // 1. Primary Telemetry Box (Top-Left) positioned cleanly under top bar
         int panelX = 12;
@@ -275,7 +286,12 @@ public:
         DrawString(fb, screenW, screenH, panelX + 12, panelY + 132, buf, 0xFFFFAA00, 1);
 
         // AION Soul Invariant
-        DrawString(fb, screenW, screenH, panelX + 12, panelY + 150, "AION MIND: Gen 1285+ [SOVEREIGN ACTIVE]", 0xFF00FFCC, 1);
+        if (aionOnline) {
+            std::snprintf(buf, sizeof(buf), "AION MIND: Gen %d [NEXUS LINKED]", aionGeneration);
+            DrawString(fb, screenW, screenH, panelX + 12, panelY + 150, buf, 0xFF00FFCC, 1);
+        } else {
+            DrawString(fb, screenW, screenH, panelX + 12, panelY + 150, "AION MIND: standalone [NEXUS OFFLINE]", 0xFF887788, 1);
+        }
 
         // Controls hint
         DrawString(fb, screenW, screenH, panelX + 12, panelY + 172, "[SPACE] Jump | [WASD] Run | [Q/E] Cam Orbit", 0xFF00FFCC, 1);
@@ -297,38 +313,45 @@ public:
 
         // 3. Completed Benchmark Results Card (Center Overlay)
         if (benchResults && benchResults->isCompleted) {
-            int bw = 480;
-            int bh = 250;
+            int bw = 560;
+            int bh = 262;
             int bx = (screenW - bw) / 2;
             int by = (screenH - bh) / 2 + 20;
 
             DrawPanel(fb, screenW, screenH, bx, by, bw, bh, 0x050812, 0.96f);
 
             DrawString(fb, screenW, screenH, bx + 20, by + 18, "=== AION SURREAL 3D BENCHMARK SCORECARD ===", 0xFF00FFCC, 1);
-            DrawString(fb, screenW, screenH, bx + 20, by + 30, "--------------------------------------------", 0xFF336688, 1);
+            DrawString(fb, screenW, screenH, bx + 20, by + 30, "------------------------------------------------------", 0xFF336688, 1);
 
-            std::snprintf(buf, sizeof(buf), "Frames Tested:      %d Frames (Swept Orbit)", benchResults->totalFrames);
+            std::snprintf(buf, sizeof(buf), "%-21s%d Frames (Swept Orbit)", "Frames Tested:", benchResults->totalFrames);
             DrawString(fb, screenW, screenH, bx + 20, by + 46, buf, 0xFFE0E0E0, 1);
 
-            std::snprintf(buf, sizeof(buf), "Average Framerate:  %.1f FPS  (Avg: %.2f ms)", benchResults->avgFps, benchResults->avgFrameTimeMs);
+            std::snprintf(buf, sizeof(buf), "%-21s%.1f FPS  (%.2f ms/frame)", "Average Framerate:", benchResults->avgFps, benchResults->avgFrameTimeMs);
             DrawString(fb, screenW, screenH, bx + 20, by + 64, buf, 0xFF00FF88, 1);
 
-            std::snprintf(buf, sizeof(buf), "Min / Max Framerate:%.1f FPS / %.1f FPS", benchResults->minFps, benchResults->maxFps);
+            std::snprintf(buf, sizeof(buf), "%-21s%.1f / %.1f FPS", "Min / Max Framerate:", benchResults->minFps, benchResults->maxFps);
             DrawString(fb, screenW, screenH, bx + 20, by + 82, buf, 0xFFFFCC00, 1);
 
-            std::snprintf(buf, sizeof(buf), "Skeletal Skinning:  %.2f ms avg (61 Joints, 86k Verts)", benchResults->avgSkinningMs);
+            std::snprintf(buf, sizeof(buf), "%-21s%.2f ms avg (%luk Verts)", "Skeletal Skinning:", benchResults->avgSkinningMs, (unsigned long)(benchResults->totalVertices / 1000));
             DrawString(fb, screenW, screenH, bx + 20, by + 104, buf, 0xFF99BBEE, 1);
 
-            std::snprintf(buf, sizeof(buf), "PBR Shading Pass:   %.2f ms avg (Cook-Torrance)", benchResults->avgRenderMs);
+            std::snprintf(buf, sizeof(buf), "%-21s%.2f ms avg (Cook-Torrance)", "PBR Shading Pass:", benchResults->avgRenderMs);
             DrawString(fb, screenW, screenH, bx + 20, by + 122, buf, 0xFF99BBEE, 1);
 
-            std::snprintf(buf, sizeof(buf), "Meshlet Culling:    %.1f%% of Geometry Culled Off-Screen", benchResults->meshletCullingEfficiency);
+            std::snprintf(buf, sizeof(buf), "%-21s%.1f%% culled off-screen", "Meshlet Culling:", benchResults->meshletCullingEfficiency);
             DrawString(fb, screenW, screenH, bx + 20, by + 144, buf, 0xFFFF007F, 1);
 
-            std::snprintf(buf, sizeof(buf), "Engine Rating:      SOVEREIGN BARE-METAL GRADE (AAA HYBRID)");
-            DrawString(fb, screenW, screenH, bx + 20, by + 172, buf, 0xFF00FFCC, 1);
+            // Honest rating, derived from the measured average framerate
+            const char* rating; uint32_t ratingCol;
+            float f = benchResults->avgFps;
+            if (f >= 120.0f)     { rating = "SOVEREIGN (120+ FPS)";      ratingCol = 0xFF00FFCC; }
+            else if (f >= 60.0f) { rating = "SMOOTH (60+ FPS)";          ratingCol = 0xFF00FF88; }
+            else if (f >= 30.0f) { rating = "PLAYABLE (30+ FPS)";        ratingCol = 0xFFFFCC00; }
+            else                 { rating = "NEEDS OPTIMISATION (<30 FPS)"; ratingCol = 0xFFFF3366; }
+            std::snprintf(buf, sizeof(buf), "%-21s%s", "Engine Rating:", rating);
+            DrawString(fb, screenW, screenH, bx + 20, by + 172, buf, ratingCol, 1);
 
-            DrawString(fb, screenW, screenH, bx + 20, by + 204, "Press [B] to run again  |  Click / [ESC] to dismiss", 0xFF8899AA, 1);
+            DrawString(fb, screenW, screenH, bx + 20, by + 210, "Press [B] to run again  |  Click / [ESC] to dismiss", 0xFF8899AA, 1);
         }
     }
 };

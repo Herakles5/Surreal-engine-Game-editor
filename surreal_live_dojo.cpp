@@ -14,6 +14,7 @@
 #include "surreal_hud.hpp"
 #include "surreal_editor.hpp"
 #include "surreal_hybrid_renderer.hpp"
+#include "surreal_aion_link.hpp"
 #include <iostream>
 #include <vector>
 #include <chrono>
@@ -21,7 +22,13 @@
 int main(int argc, char* argv[]) {
     bool headless = false;
     bool startInEditor = false;
+    bool startFullscreen = false;
+    bool useAionLink = true;
+    bool loadCity = false;
     for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--fullscreen") startFullscreen = true;
+        if (std::string(argv[i]) == "--no-aion") useAionLink = false;
+        if (std::string(argv[i]) == "--seoul" || std::string(argv[i]) == "--city") loadCity = true;
         if (std::string(argv[i]) == "--benchmark-headless") {
             headless = true;
         } else if (std::string(argv[i]) == "--editor") {
@@ -34,8 +41,8 @@ int main(int argc, char* argv[]) {
     std::cout << "  CPU + GPU Hybrid Sovereign Engine for CosmOS & Linux\n";
     std::cout << "=========================================================\n";
 
-    constexpr uint32_t WIN_WIDTH = 960;
-    constexpr uint32_t WIN_HEIGHT = 640;
+    int winW = 960;
+    int winH = 640;
 
     // Initialize SDL2
     SDL_Window* window = nullptr;
@@ -55,23 +62,24 @@ int main(int argc, char* argv[]) {
             window = SDL_CreateWindow(
                 "AION SURREAL 3D STUDIO - Hybrid CPU+GPU Game Editor & Dojo",
                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                WIN_WIDTH, WIN_HEIGHT,
+                winW, winH,
                 SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL
             );
             if (!window) {
                 std::cerr << "[-] SDL_CreateWindow failed: " << SDL_GetError() << "\n";
                 headless = true;
             } else {
-                hybridRenderer.Init(window, WIN_WIDTH, WIN_HEIGHT);
+                if (startFullscreen) SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+                hybridRenderer.Init(window, winW, winH);
             }
         }
     }
 
     // 1. Initialize Engine & CPU Framebuffers
-    std::vector<uint32_t> framebuffer(WIN_WIDTH * WIN_HEIGHT, 0xFF050812);
-    std::vector<uint32_t> hudFramebuffer(WIN_WIDTH * WIN_HEIGHT, 0x00000000);
-    Surreal::SurrealEngine engine(WIN_WIDTH, WIN_HEIGHT);
-    engine.AttachFramebuffer(framebuffer.data(), WIN_WIDTH * sizeof(uint32_t));
+    std::vector<uint32_t> framebuffer(winW * winH, 0xFF050812);
+    std::vector<uint32_t> hudFramebuffer(winW * winH, 0x00000000);
+    Surreal::SurrealEngine engine(winW, winH);
+    engine.AttachFramebuffer(framebuffer.data(), winW * sizeof(uint32_t));
 
     // 2. Build 3D Terrain & Obstacle Parkour Environment
     std::cout << "[*] Constructing 3D Cyberpunk Grid Terrain & Parkour Platforms...\n";
@@ -144,6 +152,10 @@ int main(int argc, char* argv[]) {
     // 4. Initialize Interactive World Editor
     Surreal::SurrealEditor editor;
 
+    // Aion Nexus <-> Evolution Engine link (non-blocking, optional)
+    Surreal::AionLink aionLink;
+    aionLink.enabled = useAionLink && !headless;
+
     // Register entities in Editor Outliner
     Surreal::EditableEntity floorEd;
     floorEd.id = floorEntity;
@@ -175,6 +187,37 @@ int main(int argc, char* argv[]) {
         platEd.metallic = 0.35f;
         platEd.roughness = 0.40f;
         editor.entities.push_back(platEd);
+    }
+
+    // Optional Seoul City 3D Environment (via --seoul / --city)
+    if (loadCity) {
+        std::string cityPath = "assets/models/Seoul_City_PBR.glb";
+        Surreal::SkeletalMeshInstance cityInst;
+        if (Surreal::SurrealSkeletalLoader::LoadSkeletalModel(cityPath, cityInst)) {
+            Surreal::EntityID cityEntity = engine.world.CreateEntity("Seoul_City");
+            Surreal::TransformComponent& ct = engine.world.transforms[cityEntity];
+            ct.position = Surreal::Vec3(0, 0, 0);
+            ct.scale = Surreal::Vec3(1.0f, 1.0f, 1.0f);
+
+            Surreal::MeshRendererComponent cmr;
+            cmr.mesh = cityInst.activeDeformedMesh;
+            cmr.material.albedo = Surreal::ColorRGB(1.0f, 1.0f, 1.0f);
+            cmr.material.metallic = 0.20f;
+            cmr.material.roughness = 0.50f;
+            engine.world.meshRenderers[cityEntity] = cmr;
+
+            Surreal::EditableEntity cityEd;
+            cityEd.id = cityEntity;
+            cityEd.name = "Seoul_City";
+            cityEd.position = ct.position;
+            cityEd.scale = ct.scale;
+            cityEd.color = cmr.material.albedo;
+            cityEd.metallic = cmr.material.metallic;
+            cityEd.roughness = cmr.material.roughness;
+            cityEd.isStaticTerrain = true;
+            editor.entities.push_back(cityEd);
+            std::cout << "[✓] Seoul City 3D Environment Spawned into Live Scene!\n";
+        }
     }
     editor.selectedIndex = 2; // Default select Platform_Low
 
@@ -248,6 +291,8 @@ int main(int argc, char* argv[]) {
         dt = std::min(dt, 0.05f);
 
         editor.Update(dt);
+        aionLink.Update(dt, currentFps, engine.lastFrameTimeMs, editor.entities.size(),
+                        editor.mode == Surreal::EditorMode::EDIT_MODE, hybridRenderer.GetBackendName());
 
         camInput.mouseDeltaX = 0;
         camInput.mouseDeltaY = 0;
@@ -293,6 +338,13 @@ int main(int argc, char* argv[]) {
                         }
                     } else if (sym == SDLK_TAB) {
                         editor.ToggleMode(playCamera.GetPosition(), playCamera.pitch, playCamera.yaw);
+                    } else if (sym == SDLK_F11 || (sym == SDLK_RETURN && (mod & KMOD_ALT))) {
+                        bool isFs = (SDL_GetWindowFlags(window) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
+                        if (SDL_SetWindowFullscreen(window, isFs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
+                            editor.SetStatus(std::string("[-] Fullscreen failed: ") + SDL_GetError(), 4.0f);
+                        } else {
+                            editor.SetStatus(isFs ? "[✓] Windowed Mode [F11]" : "[✓] Fullscreen Mode [F11]", 2.5f);
+                        }
                     } else if (sym == SDLK_F9) {
                         hybridRenderer.ToggleBackend();
                         editor.SetStatus("Switched Backend: " + hybridRenderer.GetBackendName(), 3.5f);
@@ -336,29 +388,27 @@ int main(int argc, char* argv[]) {
                                 playCamera.pitch = 0.28f;
                                 playCamera.yaw = 0.0f;
                                 break;
-                            case SDLK_b:
-                                if (!isBenchmarkRunning) {
-                                    isBenchmarkRunning = true;
-                                    benchmarkFrameCount = 0;
-                                    benchFpsList.clear();
-                                    benchSkinTimes.clear();
-                                    benchRenderTimes.clear();
-                                    benchResults.isCompleted = false;
-                                }
-                                break;
                         }
                     }
                     // --- WORLD EDITOR MODE CONTROLS ---
                     else {
                         if (editor.showModelCatalog) {
-                            int choice = 0;
-                            if (sym >= SDLK_1 && sym <= SDLK_9) choice = sym - SDLK_0;
-                            else if (sym >= SDLK_KP_1 && sym <= SDLK_KP_9) choice = sym - SDLK_KP_1 + 1;
+                            int slot = 0;
+                            if (sym >= SDLK_1 && sym <= SDLK_8) slot = sym - SDLK_0;
+                            else if (sym >= SDLK_KP_1 && sym <= SDLK_KP_8) slot = sym - SDLK_KP_1 + 1;
+                            else if (sym == SDLK_9 || sym == SDLK_KP_9) slot = 9;
+                            else if (sym == SDLK_0 || sym == SDLK_KP_0) slot = 10;
+                            else if (sym == SDLK_m) slot = 11;
 
-                            if (choice >= 1 && choice <= 9) {
-                                editor.SelectModelPreset(choice, character.activeDeformedMesh);
-                                editor.placementPos = editor.flyCamPos + editor.GetFlyForward() * 3.5f;
-                                editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
+                            if (slot > 0) {
+                                if (editor.PickCatalogEntry(slot, character.activeDeformedMesh)) {
+                                    editor.placementPos = editor.flyCamPos + editor.GetFlyForward() * 3.5f;
+                                    editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
+                                }
+                            } else if (sym == SDLK_PERIOD || sym == SDLK_PAGEDOWN || sym == SDLK_RIGHT) {
+                                editor.CatalogNextPage();
+                            } else if (sym == SDLK_COMMA || sym == SDLK_PAGEUP || sym == SDLK_LEFT) {
+                                editor.CatalogPrevPage();
                             } else if (sym == SDLK_TAB) {
                                 editor.CycleModelFolder();
                             } else if (sym == SDLK_F5) {
@@ -508,36 +558,29 @@ int main(int argc, char* argv[]) {
                     }
                     if (editor.mode == Surreal::EditorMode::EDIT_MODE) {
                         if (editor.showModelCatalog && ev.button.button == SDL_BUTTON_LEFT) {
-                            int maxItems = std::min(5, static_cast<int>(editor.folderModels.size()));
-                            int diagW = 580;
-                            int diagH = 260 + maxItems * 22;
-                            int diagX = (WIN_WIDTH - diagW) / 2;
-                            int diagY = (WIN_HEIGHT - diagH) / 2;
-
-                            if (ev.button.x >= diagX && ev.button.x <= diagX + diagW) {
-                                // Click on folder path banner to cycle folder
-                                if (ev.button.y >= diagY + 28 && ev.button.y <= diagY + 48) {
-                                    editor.CycleModelFolder();
-                                } else {
-                                    // Click on item line
-                                    int row = (ev.button.y - (diagY + 58)) / 22;
-                                    if (row >= 0 && row < maxItems) {
-                                        // Folder model
-                                        editor.SelectModelPreset(row + 1, character.activeDeformedMesh);
-                                        editor.placementPos = editor.flyCamPos + editor.GetFlyForward() * 3.5f;
-                                        editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
-                                    } else if (row >= maxItems + 1 && row <= maxItems + 3) {
-                                        // Built-in presets
-                                        int presetChoice = maxItems + (row - maxItems);
-                                        editor.SelectModelPreset(presetChoice, character.activeDeformedMesh);
-                                        editor.placementPos = editor.flyCamPos + editor.GetFlyForward() * 3.5f;
-                                        editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
-                                    } else if (ev.button.y > diagY + diagH - 30) {
-                                        editor.showModelCatalog = false;
-                                    }
-                                }
-                            } else {
+                            auto g = editor.GetCatalogGeom(winW, winH);
+                            int mx = ev.button.x, my = ev.button.y;
+                            bool inside = mx >= g.x && mx <= g.x + g.w && my >= g.y && my <= g.y + g.h;
+                            if (!inside) {
                                 editor.showModelCatalog = false;
+                            } else if (my >= g.y + 28 && my <= g.y + 48) {
+                                editor.CycleModelFolder();
+                            } else {
+                                int slot = 0;
+                                if (my >= g.listY && my < g.listY + g.pageCount * 22) {
+                                    slot = (my - g.listY) / 22 + 1;
+                                } else if (my >= g.navY - 4 && my < g.navY + 14) {
+                                    if (mx < g.x + g.w / 2) editor.CatalogPrevPage(); else editor.CatalogNextPage();
+                                } else if (my >= g.presetY - 2 && my < g.presetY + 58) {
+                                    int r = (my - (g.presetY - 2)) / 20;
+                                    slot = (r == 0) ? 9 : (r == 1) ? 10 : 11;
+                                } else if (my > g.y + g.h - 24) {
+                                    editor.showModelCatalog = false;
+                                }
+                                if (slot > 0 && editor.PickCatalogEntry(slot, character.activeDeformedMesh)) {
+                                    editor.placementPos = editor.flyCamPos + editor.GetFlyForward() * 3.5f;
+                                    editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
+                                }
                             }
                         } else if (editor.isPlacingModel) {
                             if (ev.button.button == SDL_BUTTON_LEFT) {
@@ -559,7 +602,7 @@ int main(int argc, char* argv[]) {
                 } else if (ev.type == SDL_MOUSEMOTION) {
                     if (editor.mode == Surreal::EditorMode::EDIT_MODE && editor.isPlacingModel) {
                         Surreal::Vec3 hit = Surreal::SurrealEditor::ScreenToGround(
-                            ev.motion.x, ev.motion.y, WIN_WIDTH, WIN_HEIGHT,
+                            ev.motion.x, ev.motion.y, winW, winH,
                             engine.cameraPos, engine.cameraTarget, engine.cameraUp,
                             engine.cameraFov, obstacles
                         );
@@ -576,6 +619,22 @@ int main(int argc, char* argv[]) {
                         camInput.scrollDelta += static_cast<float>(ev.wheel.y);
                     }
                 }
+            }
+        }
+
+        // --- LIVE VIEWPORT RESIZE (window drag, maximize, F11 fullscreen) ---
+        if (!headless && window) {
+            int dw = 0, dh = 0;
+            SDL_GL_GetDrawableSize(window, &dw, &dh);
+            if (dw > 0 && dh > 0 && (dw != winW || dh != winH)) {
+                winW = dw;
+                winH = dh;
+                framebuffer.assign(static_cast<size_t>(winW) * winH, 0xFF050812);
+                hudFramebuffer.assign(static_cast<size_t>(winW) * winH, 0x00000000);
+                engine.Resize(winW, winH);
+                engine.AttachFramebuffer(framebuffer.data(), winW * sizeof(uint32_t));
+                hybridRenderer.Resize(winW, winH);
+                std::cout << "[*] Viewport resized to " << winW << "x" << winH << "\n";
             }
         }
 
@@ -742,19 +801,21 @@ int main(int argc, char* argv[]) {
 
             if (editor.mode == Surreal::EditorMode::PLAY_MODE) {
                 Surreal::SurrealHUD::RenderHUD(
-                    hudFramebuffer.data(), WIN_WIDTH, WIN_HEIGHT,
+                    hudFramebuffer.data(), winW, winH,
                     currentFps, engine.lastFrameTimeMs + lastSkinningMs, lastSkinningMs,
                     engine.renderedMeshlets, engine.culledMeshlets,
                     character.bindVertices.size(), character.activeDeformedMesh->indices.size() / 3,
                     clipName, character.currentTime,
                     playCamera.distance, playCamera.pitch, playCamera.yaw,
                     isBenchmarkRunning, benchProgress,
-                    benchResults.isCompleted ? &benchResults : nullptr
+                    benchResults.isCompleted ? &benchResults : nullptr,
+                    aionLink.generation, aionLink.connected
                 );
             }
 
-            editor.RenderEditorHUD(hudFramebuffer.data(), WIN_WIDTH, WIN_HEIGHT, currentFps, engine.lastFrameTimeMs, hybridRenderer.GetBackendName());
-            hybridRenderer.BlitHUDOverlay(hudFramebuffer.data(), WIN_WIDTH, WIN_HEIGHT);
+            editor.RenderEditorHUD(hudFramebuffer.data(), winW, winH, currentFps, engine.lastFrameTimeMs, hybridRenderer.GetBackendName());
+            aionLink.RenderHUD(hudFramebuffer.data(), winW, winH);
+            hybridRenderer.BlitHUDOverlay(hudFramebuffer.data(), winW, winH);
             hybridRenderer.Present();
 
         } else {
@@ -777,21 +838,23 @@ int main(int argc, char* argv[]) {
             int benchProgress = isBenchmarkRunning ? ((benchmarkFrameCount * 100) / TOTAL_BENCHMARK_FRAMES) : 0;
             if (editor.mode == Surreal::EditorMode::PLAY_MODE) {
                 Surreal::SurrealHUD::RenderHUD(
-                    framebuffer.data(), WIN_WIDTH, WIN_HEIGHT,
+                    framebuffer.data(), winW, winH,
                     currentFps, engine.lastFrameTimeMs + lastSkinningMs, lastSkinningMs,
                     engine.renderedMeshlets, engine.culledMeshlets,
                     character.bindVertices.size(), character.activeDeformedMesh->indices.size() / 3,
                     clipName, character.currentTime,
                     playCamera.distance, playCamera.pitch, playCamera.yaw,
                     isBenchmarkRunning, benchProgress,
-                    benchResults.isCompleted ? &benchResults : nullptr
+                    benchResults.isCompleted ? &benchResults : nullptr,
+                    aionLink.generation, aionLink.connected
                 );
             }
 
-            editor.RenderEditorHUD(framebuffer.data(), WIN_WIDTH, WIN_HEIGHT, currentFps, engine.lastFrameTimeMs, hybridRenderer.GetBackendName());
+            editor.RenderEditorHUD(framebuffer.data(), winW, winH, currentFps, engine.lastFrameTimeMs, hybridRenderer.GetBackendName());
 
+            aionLink.RenderHUD(framebuffer.data(), winW, winH);
             if (!headless && hybridRenderer.isGLInitialized) {
-                hybridRenderer.BlitSoftwareFramebuffer(framebuffer.data(), WIN_WIDTH, WIN_HEIGHT);
+                hybridRenderer.BlitSoftwareFramebuffer(framebuffer.data(), winW, winH);
                 hybridRenderer.Present();
             }
         }
@@ -844,6 +907,14 @@ int main(int argc, char* argv[]) {
 
                 isBenchmarkRunning = false;
                 editor.SetStatus("[✓] Benchmark Complete! Scorecard displayed.", 6.0f);
+
+                // Report to Aion Nexus: logged by the Evolution Engine, Aion comments out loud
+                aionLink.SendBenchmark(benchResults, winW, winH, hybridRenderer.GetBackendName());
+                char speech[160];
+                std::snprintf(speech, sizeof(speech),
+                    "Surreal Engine benchmark complete. Average %.0f frames per second at %d by %d.",
+                    benchResults.avgFps, winW, winH);
+                aionLink.Speak(speech);
             }
         }
 

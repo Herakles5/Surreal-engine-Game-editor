@@ -112,6 +112,7 @@ graph TD
 | `[DEL] / [X]` | Delete Selected Entity |
 | `[F6] / [F7]` | Save / Load Scene Level JSON (`scene_level.json`) |
 | `[F9]` | Toggle GPU OpenGL 4.6 <-> CPU Bare-Metal AVX2 |
+| `[F11]` / `[Alt+Enter]` | Toggle **Fullscreen** (viewport, depth buffer & HUD re-allocate live; also follows window resize) |
 
 ---
 
@@ -147,13 +148,26 @@ This installs:
 
 ---
 
+## 🧠 Aion Nexus Link (Evolution Engine ↔ Surreal Studio)
+
+Surreal Studio connects, non-blocking and optional, to the Aion Nexus Evolution Engine IPC server
+(`/tmp/aion_nexus.sock`, TCP fallback `127.0.0.1:9099`; override with `AION_NEXUS_SOCK`):
+
+- **Nexus → Studio:** live generation / rule count, current evolution step, autonomous goals and newly learned rules appear in the bottom-left *AION NEXUS* panel.
+- **Studio → Nexus:** 1 Hz telemetry (FPS, frame time, entities, mode, backend) and every `[B]` benchmark scorecard. The Evolution Engine logs scorecards to `surreal_benchmarks.jsonl`, tracks records, and queues an optimisation task whenever a run averages below 30 FPS. Aion also speaks the result.
+- Offline-safe: without a running Evolution Engine the panel shows `OFFLINE (retrying)`. Disable entirely with `--no-aion`.
+
+Aion's own avatars (13 GLB models + Mia) are linked into the importer by `./install_aion_avatars.sh`.
+
+---
+
 ## 📦 Dynamic 3D Model Importer
 
 You can import any 3D model downloaded from the web (Turbosquid, Sketchfab, Blender, etc.):
 1. Drop your downloaded `.obj`, `.gltf`, or `.glb` files into `assets/models/` or `assets/custom_models/`.
 2. Launch `surreal-editor` and press `[TAB]` to enter Editor Mode.
 3. Press `[L]` to open the Model Importer.
-4. Click your file in the list or press `[1]–[9]`.
+4. Click your file in the list or press `[1]–[8]` (items on the current page). Page through large libraries with `[,]` / `[.]` (or `[PgUp]` / `[PgDn]`); `[9]` Ramp, `[0]` Monolith, `[M]` Mia clone are the built-in presets.
 5. Move the mouse to position the ghost model on the ground or on top of platforms.
 6. Left-click to drop it into the world. It will instantly receive physical collisions!
 
@@ -187,3 +201,4 @@ g++ -std=c++17 game.cpp $(pkg-config --cflags --libs surreal) -o my_game
 ## 📜 License
 Distributed under the MIT License. See [LICENSE](LICENSE) for details.
 Developed by Herakles5 for CosmOS & Linux Sovereign Gaming Ecosystems.
+

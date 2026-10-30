@@ -517,7 +517,8 @@ public:
                     baseFactor[3] = pbr.base_color_factor[3];
 
                     if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
-                        const char* uri = pbr.base_color_texture.texture->image->uri;
+                        cgltf_image* img = pbr.base_color_texture.texture->image;
+                        const char* uri = img->uri;
                         if (uri) {
                             std::string fullPath = baseDir + "/" + uri;
                             auto it = texCache.find(fullPath);
@@ -529,6 +530,22 @@ public:
                                               << " (" << rawT->width << "x" << rawT->height << ")\n";
                                 }
                                 texCache[fullPath] = rawT;
+                                activeTex = rawT;
+                            } else {
+                                activeTex = it->second;
+                            }
+                        } else if (img->buffer_view && img->buffer_view->buffer && img->buffer_view->buffer->data) {
+                            std::string memKey = "glb_mem_" + std::to_string(reinterpret_cast<uintptr_t>(img));
+                            auto it = texCache.find(memKey);
+                            if (it == texCache.end()) {
+                                const uint8_t* ptr = static_cast<const uint8_t*>(img->buffer_view->buffer->data) + img->buffer_view->offset;
+                                size_t size = img->buffer_view->size;
+                                auto rawT = std::make_shared<RawTextureBuffer>();
+                                rawT->pixels = stbi_load_from_memory(ptr, static_cast<int>(size), &rawT->width, &rawT->height, &rawT->channels, 4);
+                                if (rawT->pixels) {
+                                    std::cout << "[+] Loaded Embedded GLB Texture (" << rawT->width << "x" << rawT->height << ")\n";
+                                }
+                                texCache[memKey] = rawT;
                                 activeTex = rawT;
                             } else {
                                 activeTex = it->second;
@@ -600,10 +617,16 @@ public:
                             colB *= baseFactor[2] * 5.0f;
                         }
                     } else if (prim.material && prim.material->has_pbr_metallic_roughness) {
-                        // Solid-color materials without textures (e.g. dark underwear & inner hair cap)
-                        colR = baseFactor[0] * 4.0f;
-                        colG = baseFactor[1] * 4.0f;
-                        colB = baseFactor[2] * 4.0f;
+                        // Solid-color materials without textures
+                        if (hasCustomTint) {
+                            colR = std::min(1.0f, baseFactor[0] * 4.0f);
+                            colG = std::min(1.0f, baseFactor[1] * 4.0f);
+                            colB = std::min(1.0f, baseFactor[2] * 4.0f);
+                        } else {
+                            colR = baseFactor[0];
+                            colG = baseFactor[1];
+                            colB = baseFactor[2];
+                        }
                     }
 
                     vert.color = Vec4(colR, colG, colB, 1.0f);

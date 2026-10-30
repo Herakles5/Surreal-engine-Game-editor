@@ -129,6 +129,22 @@ public:
         return true;
     }
 
+    /**
+     * Resize GL viewport + screen/HUD textures (window resize / fullscreen toggle).
+     */
+    void Resize(uint32_t w, uint32_t h) {
+        if (w == 0 || h == 0) return;
+        screenWidth = w;
+        screenHeight = h;
+        if (!isGLInitialized) return;
+
+        glBindTexture(GL_TEXTURE_2D, screenTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, screenWidth, screenHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+        glBindTexture(GL_TEXTURE_2D, hudTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, screenWidth, screenHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+        glViewport(0, 0, screenWidth, screenHeight);
+    }
+
     void ToggleBackend() {
         if (!isGLInitialized) {
             backend = RenderBackend::CPU_AVX2;
@@ -244,6 +260,7 @@ public:
     void BlitSoftwareFramebuffer(const uint32_t* fb, int w, int h) {
         if (!isGLInitialized || !fb) return;
 
+        glViewport(0, 0, screenWidth, screenHeight);
         glBindTexture(GL_TEXTURE_2D, screenTex);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, fb);
 

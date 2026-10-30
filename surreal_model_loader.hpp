@@ -392,7 +392,11 @@ public:
         }
 
         for (const auto& entry : fs::directory_iterator(folderPath, ec)) {
-            if (entry.is_regular_file()) {
+            bool isFile = false;
+            if (entry.is_regular_file(ec)) isFile = true;
+            else if (entry.is_symlink(ec) && fs::is_regular_file(entry.path(), ec)) isFile = true;
+
+            if (isFile) {
                 std::string ext = entry.path().extension().string();
                 for (auto& c : ext) c = tolower(c);
                 if (ext == ".obj" || ext == ".gltf" || ext == ".glb") {
@@ -400,7 +404,7 @@ public:
                     item.filename = entry.path().filename().string();
                     item.fullPath = entry.path().string();
                     item.extension = ext;
-                    item.sizeBytes = entry.file_size(ec);
+                    item.sizeBytes = fs::file_size(entry.path(), ec);
                     results.push_back(item);
                 }
             }

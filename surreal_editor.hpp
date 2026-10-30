@@ -78,11 +78,14 @@ public:
     std::vector<std::string> modelFolders = {
         "assets/models",
         "/root/coding/MeinOS/surreal_engine/assets/models",
+        "/opt/meinos",
         "assets/custom_models",
         "/root/Downloads"
     };
     int activeFolderIndex = 0;
     std::vector<DiscoveredModelFile> folderModels;
+    int catalogPage = 0;
+    static constexpr int ITEMS_PER_PAGE = 8;
 
     // Color Preset Palette
     const std::vector<ColorRGB> colorPalette = {
@@ -179,8 +182,72 @@ public:
 
     // --- 3D MODEL LOADER, FOLDER IMPORTER & PLACEMENT LOGIC ---
 
+    int GetTotalCatalogPages() const {
+        if (folderModels.empty()) return 1;
+        return (static_cast<int>(folderModels.size()) + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE;
+    }
+
+    void CatalogNextPage() {
+        int total = GetTotalCatalogPages();
+        catalogPage = (catalogPage + 1) % total;
+        SetStatus("[*] Catalog Page " + std::to_string(catalogPage + 1) + "/" + std::to_string(total), 2.0f);
+    }
+
+    void CatalogPrevPage() {
+        int total = GetTotalCatalogPages();
+        catalogPage = (catalogPage - 1 + total) % total;
+        SetStatus("[*] Catalog Page " + std::to_string(catalogPage + 1) + "/" + std::to_string(total), 2.0f);
+    }
+
+    // Shared layout for catalog drawing AND mouse hit-testing (single source of truth)
+    struct CatalogGeom {
+        int x, y, w, h;
+        int listY, navY, presetY;
+        int pageStart, pageEnd, pageCount, rows;
+    };
+
+    CatalogGeom GetCatalogGeom(int screenW, int screenH) {
+        CatalogGeom g;
+        int totalPages = GetTotalCatalogPages();
+        if (catalogPage >= totalPages) catalogPage = totalPages - 1;
+        if (catalogPage < 0) catalogPage = 0;
+        g.pageStart = catalogPage * ITEMS_PER_PAGE;
+        g.pageEnd = std::min(g.pageStart + ITEMS_PER_PAGE, static_cast<int>(folderModels.size()));
+        g.pageCount = std::max(0, g.pageEnd - g.pageStart);
+        g.rows = std::max(1, g.pageCount);
+        g.w = 620;
+        g.h = 215 + g.rows * 22;
+        g.x = (screenW - g.w) / 2;
+        g.y = (screenH - g.h) / 2;
+        g.listY = g.y + 58;
+        g.navY = g.listY + g.rows * 22 + 4;
+        g.presetY = g.navY + 42; // first preset row (after nav bar + header)
+        return g;
+    }
+
+    // Returns true if a model/preset was picked and placement started.
+    // Keys: 1-8 = item on current page, 9 = Ramp, 0 = Monolith, M = Mia clone.
+    bool PickCatalogEntry(int slot, const std::shared_ptr<SurrealMesh>& avatarMesh) {
+        // slot: 1..8 page items, 9/10/11 = builtin presets 1/2/4
+        if (slot >= 1 && slot <= ITEMS_PER_PAGE) {
+            int idx = catalogPage * ITEMS_PER_PAGE + (slot - 1);
+            if (idx >= static_cast<int>(folderModels.size())) return false;
+            SelectFolderModel(idx, avatarMesh);
+        } else if (slot == 9) {
+            SelectBuiltinPreset(1, avatarMesh);
+        } else if (slot == 10) {
+            SelectBuiltinPreset(2, avatarMesh);
+        } else if (slot == 11) {
+            SelectBuiltinPreset(4, avatarMesh);
+        } else {
+            return false;
+        }
+        return isPlacingModel;
+    }
+
     void RefreshModelFolder() {
         folderModels.clear();
+        catalogPage = 0;
         std::string currentPath = modelFolders[activeFolderIndex];
         folderModels = SurrealModelLoader::ScanFolder(currentPath);
 
@@ -199,6 +266,7 @@ public:
 
     void CycleModelFolder() {
         activeFolderIndex = (activeFolderIndex + 1) % modelFolders.size();
+        catalogPage = 0;
         folderModels = SurrealModelLoader::ScanFolder(modelFolders[activeFolderIndex]);
         SetStatus("[*] Switched 3D Folder: " + modelFolders[activeFolderIndex] + " (" + std::to_string(folderModels.size()) + " models found)");
     }
@@ -207,88 +275,116 @@ public:
         showModelCatalog = !showModelCatalog;
         if (showModelCatalog) {
             RefreshModelFolder();
-            SetStatus("[*] 3D Model Importer Open: Choose model from folder or preset", 4.0f);
+            SetStatus("[*] 3D Model Importer: " + std::to_string(folderModels.size()) + " models found. Choose [1]-[8] or Page with [,] [.]", 4.0f);
         }
     }
 
-    void SelectModelPreset(int choice, const std::shared_ptr<SurrealMesh>& avatarMesh = nullptr) {
+    void SelectFolderModel(int fileIndex, const std::shared_ptr<SurrealMesh>& avatarMesh = nullptr) {
+        if (fileIndex < 0 || fileIndex >= static_cast<int>(folderModels.size())) return;
+        const auto& file = folderModels[fileIndex];
+
+        placementScale = Vec3(1.0f, 1.0f, 1.0f);
+        placementYaw = 0.0f;
+        placementColor = ColorRGB(1.0f, 1.0f, 1.0f); // Default neutral albedo for textured models
+        placementMetallic = 0.25f;
+        placementRoughness = 0.45f;
+
+        bool loaded = false;
+        if (file.extension == ".obj") {
+            placementColor = colorPalette[currentPaletteIdx % colorPalette.size()];
+            loaded = SurrealModelLoader::LoadCustomFile(file.fullPath, placementMesh, placementColor);
+        } else if (file.extension == ".gltf" || file.extension == ".glb") {
+            SkeletalMeshInstance inst;
+            loaded = SurrealSkeletalLoader::LoadSkeletalModel(file.fullPath, inst);
+            if (loaded) placementMesh = inst.activeDeformedMesh;
+        }
+
+        if (!loaded || !placementMesh) {
+            SetStatus("[-] Failed to load 3D model file: " + file.filename, 4.0f);
+            return;
+        }
+
+        // Clean name without extension
+        std::string baseName = file.filename;
+        size_t dot = baseName.rfind('.');
+        if (dot != std::string::npos) baseName = baseName.substr(0, dot);
+        placementName = baseName + "_" + std::to_string(entities.size() + 1);
+
+        // Normalize scale
+        placementMesh->CalculateBounds();
+        Vec3 ext = placementMesh->worldBounds.Extents() * 2.0f;
+        float maxDim = std::max({ext.x, ext.y, ext.z});
+        float scaleFactor = 1.0f;
+        if (maxDim > 0.001f) {
+            bool isEnvironment = (baseName.find("City") != std::string::npos ||
+                                  baseName.find("Seoul") != std::string::npos ||
+                                  baseName.find("Map") != std::string::npos ||
+                                  baseName.find("World") != std::string::npos);
+            if (isEnvironment) {
+                scaleFactor = 1.0f; // Keep real-world 1:1 scale for cities & environments!
+            } else if (maxDim > 50.0f) {
+                scaleFactor = 2.0f / maxDim;
+            } else if (maxDim < 0.2f) {
+                scaleFactor = 1.5f / maxDim;
+            } else {
+                scaleFactor = 1.8f / maxDim;
+            }
+        }
+        placementScale = Vec3(scaleFactor, scaleFactor, scaleFactor);
+        activePreset = ModelPresetType::CUSTOM_FILE;
+
+        showModelCatalog = false;
+        isPlacingModel = true;
+        SetStatus("[+] PLACING: " + placementName + " | Move Mouse, Left-Click to drop, [R] Rotate, [ESC] Cancel", 5.0f);
+    }
+
+    void SelectBuiltinPreset(int presetIdx, const std::shared_ptr<SurrealMesh>& avatarMesh = nullptr) {
         placementScale = Vec3(1.0f, 1.0f, 1.0f);
         placementYaw = 0.0f;
         placementColor = colorPalette[currentPaletteIdx % colorPalette.size()];
         placementMetallic = 0.45f;
         placementRoughness = 0.35f;
 
-        // 1. If choice is within discovered folder files:
-        if (choice >= 1 && choice <= static_cast<int>(folderModels.size())) {
-            const auto& file = folderModels[choice - 1];
-            bool loaded = false;
-            if (file.extension == ".obj") {
-                loaded = SurrealModelLoader::LoadCustomFile(file.fullPath, placementMesh, placementColor);
-            } else if (file.extension == ".gltf" || file.extension == ".glb") {
-                SkeletalMeshInstance inst;
-                loaded = SurrealSkeletalLoader::LoadSkeletalModel(file.fullPath, inst);
-                if (loaded) placementMesh = inst.activeDeformedMesh;
-            }
-
-            if (!loaded || !placementMesh) {
-                SetStatus("[-] Failed to load 3D model file: " + file.filename, 4.0f);
-                return;
-            }
-
-            // Clean name without extension
-            std::string baseName = file.filename;
-            size_t dot = baseName.rfind('.');
-            if (dot != std::string::npos) baseName = baseName.substr(0, dot);
-            placementName = baseName + "_" + std::to_string(entities.size() + 1);
-
-            // Normalize scale
-            placementMesh->CalculateBounds();
-            Vec3 ext = placementMesh->worldBounds.Extents() * 2.0f;
-            float maxDim = std::max({ext.x, ext.y, ext.z});
-            float scaleFactor = 1.0f;
-            if (maxDim > 0.001f) {
-                if (maxDim > 50.0f) scaleFactor = 2.0f / maxDim;
-                else if (maxDim < 0.2f) scaleFactor = 1.5f / maxDim;
-                else scaleFactor = 1.8f / maxDim;
-            }
-            placementScale = Vec3(scaleFactor, scaleFactor, scaleFactor);
-            activePreset = ModelPresetType::CUSTOM_FILE;
-        }
-        // 2. Otherwise it's a built-in procedural preset:
-        else {
-            int presetIdx = choice - static_cast<int>(folderModels.size());
-            switch (presetIdx) {
-                case 1:
-                    placementName = "ParkourRamp_" + std::to_string(entities.size() + 1);
-                    placementScale = Vec3(2.2f, 1.5f, 3.8f);
-                    placementMesh = SurrealModelLoader::CreateRamp(placementScale, placementColor);
-                    activePreset = ModelPresetType::RAMP;
-                    break;
-                case 2:
-                    placementName = "CyberMonolith_" + std::to_string(entities.size() + 1);
-                    placementScale = Vec3(1.4f, 3.2f, 1.4f);
-                    placementMesh = SurrealModelLoader::CreateMonolith(placementScale, placementColor);
-                    activePreset = ModelPresetType::MONOLITH;
-                    break;
-                case 3:
-                    placementName = "QuantumCore_" + std::to_string(entities.size() + 1);
-                    placementScale = Vec3(1.6f, 1.6f, 1.6f);
-                    placementMesh = SurrealModelLoader::CreateOrb(0.85f, 18, 24, placementColor);
-                    activePreset = ModelPresetType::ORB;
-                    break;
-                default:
-                case 4:
-                    placementName = "AvatarClone_" + std::to_string(entities.size() + 1);
-                    placementScale = Vec3(0.01f, 0.01f, 0.01f);
-                    placementMesh = avatarMesh ? avatarMesh : SurrealModelLoader::CreateMonolith(Vec3(1, 2, 1), placementColor);
-                    activePreset = ModelPresetType::AVATAR_CLONE;
-                    break;
-            }
+        switch (presetIdx) {
+            case 1:
+                placementName = "ParkourRamp_" + std::to_string(entities.size() + 1);
+                placementScale = Vec3(2.2f, 1.5f, 3.8f);
+                placementMesh = SurrealModelLoader::CreateRamp(placementScale, placementColor);
+                activePreset = ModelPresetType::RAMP;
+                break;
+            case 2:
+                placementName = "CyberMonolith_" + std::to_string(entities.size() + 1);
+                placementScale = Vec3(1.4f, 3.2f, 1.4f);
+                placementMesh = SurrealModelLoader::CreateMonolith(placementScale, placementColor);
+                activePreset = ModelPresetType::MONOLITH;
+                break;
+            case 3:
+                placementName = "QuantumCore_" + std::to_string(entities.size() + 1);
+                placementScale = Vec3(1.6f, 1.6f, 1.6f);
+                placementMesh = SurrealModelLoader::CreateOrb(0.85f, 18, 24, placementColor);
+                activePreset = ModelPresetType::ORB;
+                break;
+            default:
+            case 4:
+                placementName = "AvatarClone_" + std::to_string(entities.size() + 1);
+                placementScale = Vec3(0.01f, 0.01f, 0.01f);
+                placementMesh = avatarMesh ? avatarMesh : SurrealModelLoader::CreateMonolith(Vec3(1, 2, 1), placementColor);
+                activePreset = ModelPresetType::AVATAR_CLONE;
+                break;
         }
 
         showModelCatalog = false;
         isPlacingModel = true;
         SetStatus("[+] PLACING: " + placementName + " | Move Mouse, Left-Click to drop, [R] Rotate, [ESC] Cancel", 5.0f);
+    }
+
+    void SelectModelPreset(int choice, const std::shared_ptr<SurrealMesh>& avatarMesh = nullptr) {
+        if (choice >= 1 && choice <= static_cast<int>(folderModels.size())) {
+            SelectFolderModel(choice - 1, avatarMesh);
+        } else {
+            int presetIdx = choice - static_cast<int>(folderModels.size());
+            SelectBuiltinPreset(presetIdx, avatarMesh);
+        }
     }
 
     // Screen to Ground Raycasting for Mouse Placement
@@ -830,54 +926,61 @@ public:
 
         // 3. 3D Model Spawner & Asset Browser Modal Dialog
         if (showModelCatalog) {
-            int diagW = 580;
-            int maxItems = std::min(5, static_cast<int>(folderModels.size()));
-            int diagH = 260 + maxItems * 22;
-            int diagX = (screenW - diagW) / 2;
-            int diagY = (screenH - diagH) / 2;
+            CatalogGeom g = GetCatalogGeom(screenW, screenH);
+            int totalPages = GetTotalCatalogPages();
+            int diagX = g.x, diagY = g.y;
 
-            SurrealHUD::DrawPanel(fb, screenW, screenH, diagX, diagY, diagW, diagH, 0x050A18, 0.96f);
+            SurrealHUD::DrawPanel(fb, screenW, screenH, g.x, g.y, g.w, g.h, 0x050A18, 0.96f);
             SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, diagY + 16, "=== 3D MODEL FOLDER IMPORTER & BROWSER ===", 0xFF00FFCC, 1);
 
-            char folderBuf[128];
+            char folderBuf[160];
             std::string dispFolder = modelFolders[activeFolderIndex % modelFolders.size()];
-            std::snprintf(folderBuf, sizeof(folderBuf), "Folder: [%s] (%zu files found)",
-                          dispFolder.c_str(), folderModels.size());
+            std::snprintf(folderBuf, sizeof(folderBuf), "Folder: [%s] (%zu files) | Page %d/%d",
+                          dispFolder.c_str(), folderModels.size(), catalogPage + 1, totalPages);
             SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, diagY + 34, folderBuf, 0xFF88AABB, 1);
             SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, diagY + 46, "-------------------------------------------------------------", 0xFF335577, 1);
 
-            int yPos = diagY + 58;
-            int itemNum = 1;
-
-            // List Discovered Files from Folder
-            for (size_t i = 0; i < folderModels.size() && itemNum <= 5; ++i, ++itemNum) {
+            int yPos = g.listY;
+            for (int i = g.pageStart; i < g.pageEnd; ++i) {
+                int keyNum = (i - g.pageStart) + 1;
                 const auto& item = folderModels[i];
-                char lineBuf[128];
+                char lineBuf[160];
                 float kb = item.sizeBytes / 1024.0f;
-                std::snprintf(lineBuf, sizeof(lineBuf), "[%d] %-22s  %.1f KB  [%s]",
-                              itemNum, item.filename.c_str(), kb, item.extension.c_str());
-                SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos, lineBuf, 0xFF00E5FF, 1);
+                std::string displayName = item.filename;
+                if (displayName.length() > 28) displayName = displayName.substr(0, 26) + "..";
+                std::snprintf(lineBuf, sizeof(lineBuf), "[%d] %-28s  %7.1f KB  [%s]",
+                              keyNum, displayName.c_str(), kb, item.extension.c_str());
+
+                // Color highlight: Neon Pink for Avatars, Radiant Gold for Cities/Maps
+                uint32_t itemCol = 0xFF00E5FF;
+                if (item.filename.find("Aion") != std::string::npos ||
+                    item.filename.find("Avatar") != std::string::npos ||
+                    item.filename.find("model_") != std::string::npos)
+                {
+                    itemCol = 0xFFFF00DD; // Neon Pink for Aion Avatars
+                } else if (item.filename.find("City") != std::string::npos ||
+                           item.filename.find("Seoul") != std::string::npos)
+                {
+                    itemCol = 0xFFFFCC00; // Radiant Gold for City / World Maps!
+                }
+                SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos, lineBuf, itemCol, 1);
                 yPos += 22;
             }
+            if (g.pageCount == 0) {
+                SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos, "[ No 3D models found in this directory ]", 0xFF888888, 1);
+            }
 
-            // Built-in Presets
-            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos + 4, "--- Engine Built-in Presets ---", 0xFF667788, 1);
-            yPos += 22;
+            char pageNavBuf[128];
+            std::snprintf(pageNavBuf, sizeof(pageNavBuf), "[< PREV ( , )]          Page %d / %d          [NEXT ( . ) >]",
+                          catalogPage + 1, totalPages);
+            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, g.navY, pageNavBuf, 0xFF00FF88, 1);
 
-            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos,
-                                   "[" + std::to_string(itemNum) + "] Parkour Ramp (Walkable Wedge Slope)", 0xFFFF8800, 1);
-            yPos += 22; itemNum++;
-
-            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos,
-                                   "[" + std::to_string(itemNum) + "] Cyber Monolith (Sci-Fi Beveled Obelisk)", 0xFFFFCC00, 1);
-            yPos += 22; itemNum++;
-
-            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos,
-                                   "[" + std::to_string(itemNum) + "] Mia Avatar Clone (glTF Rigged Character)", 0xFFFF007F, 1);
-            yPos += 26;
-
-            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, yPos,
-                                   "Click or Press [1]-[8] | [TAB] Switch Folder | [F5] Rescan | [ESC] Cancel", 0xFF00FF88, 1);
+            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, g.presetY - 20, "--- Engine Built-in Presets ---", 0xFF667788, 1);
+            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, g.presetY,      "[9] Parkour Ramp (Walkable Wedge Slope)", 0xFFFF8800, 1);
+            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, g.presetY + 20, "[0] Cyber Monolith (Sci-Fi Beveled Obelisk)", 0xFFFFCC00, 1);
+            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, g.presetY + 40, "[M] Mia Avatar Clone (glTF Rigged Character)", 0xFFFF007F, 1);
+            SurrealHUD::DrawString(fb, screenW, screenH, diagX + 20, g.presetY + 66,
+                                   "[1]-[8] Select | [,][.] Page | [TAB] Folder | [F5] Rescan | [ESC] Close", 0xFF00FF88, 1);
         }
 
         // 4. Mouse / Keyboard Placement HUD Banner
