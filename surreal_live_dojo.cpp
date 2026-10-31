@@ -434,44 +434,44 @@ int main(int argc, char* argv[]) {
     };
 
     const AtmosphericProfile skyProfiles[4] = {
-        // 0: CYBERPUNK NIGHT - Midnight neon street life & starry celestial dome
+        // 0: CYBERPUNK NIGHT - Authentic midnight city, dark asphalt, neon contrast & starry sky
         {"Cyberpunk Nacht (Night)",
          Surreal::Vec3(-0.35f, 0.85f, -0.40f).Normalized(),
-         Surreal::ColorRGB(0.45f, 0.65f, 1.0f), 0.85f,
-         Surreal::ColorRGB(0.12f, 0.14f, 0.22f),
-         Surreal::ColorRGB(0.005f, 0.008f, 0.020f),
-         Surreal::ColorRGB(0.04f, 0.08f, 0.20f),
-         Surreal::ColorRGB(0.015f, 0.02f, 0.035f),
+         Surreal::ColorRGB(0.25f, 0.38f, 0.65f), 0.15f,
+         Surreal::ColorRGB(0.016f, 0.020f, 0.035f),
+         Surreal::ColorRGB(0.002f, 0.003f, 0.008f),
+         Surreal::ColorRGB(0.008f, 0.014f, 0.028f),
+         Surreal::ColorRGB(0.005f, 0.007f, 0.012f),
          true},
 
         // 1: DAY - Clear Seoul daylight with deep azure zenith
         {"Tag (Daylight)",
          Surreal::Vec3(0.45f, 0.85f, 0.35f).Normalized(),
-         Surreal::ColorRGB(1.0f, 0.96f, 0.88f), 1.30f,
-         Surreal::ColorRGB(0.35f, 0.38f, 0.44f),
+         Surreal::ColorRGB(1.0f, 0.96f, 0.88f), 1.20f,
+         Surreal::ColorRGB(0.28f, 0.30f, 0.35f),
          Surreal::ColorRGB(0.12f, 0.36f, 0.82f),
-         Surreal::ColorRGB(0.64f, 0.78f, 0.94f),
-         Surreal::ColorRGB(0.18f, 0.20f, 0.24f),
+         Surreal::ColorRGB(0.60f, 0.72f, 0.88f),
+         Surreal::ColorRGB(0.15f, 0.16f, 0.18f),
          false},
 
         // 2: SUNSET - Golden hour & blazing magenta horizon
         {"Sonnenuntergang (Sunset)",
          Surreal::Vec3(0.85f, 0.18f, 0.45f).Normalized(),
-         Surreal::ColorRGB(1.35f, 0.55f, 0.20f), 1.25f,
-         Surreal::ColorRGB(0.28f, 0.20f, 0.30f),
-         Surreal::ColorRGB(0.20f, 0.08f, 0.32f),
-         Surreal::ColorRGB(0.92f, 0.42f, 0.18f),
-         Surreal::ColorRGB(0.10f, 0.08f, 0.10f),
+         Surreal::ColorRGB(1.35f, 0.50f, 0.18f), 1.15f,
+         Surreal::ColorRGB(0.18f, 0.12f, 0.20f),
+         Surreal::ColorRGB(0.18f, 0.06f, 0.28f),
+         Surreal::ColorRGB(0.85f, 0.35f, 0.14f),
+         Surreal::ColorRGB(0.08f, 0.06f, 0.08f),
          false},
 
         // 3: NEON DAWN - Indigo morning mist & cyberpunk horizon glow
         {"Neon Morgendaemmerung (Dawn)",
-         Surreal::Vec3(-0.6f, 0.40f, 0.65f).Normalized(),
-         Surreal::ColorRGB(0.95f, 0.60f, 0.85f), 1.05f,
-         Surreal::ColorRGB(0.22f, 0.20f, 0.32f),
-         Surreal::ColorRGB(0.08f, 0.06f, 0.22f),
-         Surreal::ColorRGB(0.55f, 0.24f, 0.45f),
-         Surreal::ColorRGB(0.06f, 0.06f, 0.09f),
+         Surreal::Vec3(-0.6f, 0.38f, 0.65f).Normalized(),
+         Surreal::ColorRGB(0.85f, 0.50f, 0.75f), 0.75f,
+         Surreal::ColorRGB(0.10f, 0.09f, 0.18f),
+         Surreal::ColorRGB(0.06f, 0.04f, 0.18f),
+         Surreal::ColorRGB(0.45f, 0.18f, 0.38f),
+         Surreal::ColorRGB(0.04f, 0.04f, 0.06f),
          false}
     };
     int currentSkyProfile = 0; // Default to immersive Cyberpunk Night!
@@ -1097,7 +1097,8 @@ int main(int argc, char* argv[]) {
                 engine.world.sunLight.direction,
                 engine.world.sunLight.color * engine.world.sunLight.intensity,
                 engine.world.ambientLight,
-                engine.cameraPos
+                engine.cameraPos,
+                curSky.horizonColor
             );
 
             Surreal::Mat4 vpMat = engine.GetProjectionMatrix() * engine.GetViewMatrix();

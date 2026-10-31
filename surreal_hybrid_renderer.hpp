@@ -68,6 +68,7 @@ public:
     GLint uRoughnessLoc;
     GLint uAlbedoMapLoc;
     GLint uHasTextureLoc;
+    GLint uFogColorLoc;
 
     // Sky Dome Uniform Locations
     GLint uSkyInvVPLoc;
@@ -98,7 +99,7 @@ public:
           uSunDirLoc(-1), uSunColorLoc(-1),
           uAmbientColorLoc(-1), uCamPosLoc(-1),
           uAlbedoLoc(-1), uMetallicLoc(-1),
-          uRoughnessLoc(-1),
+          uRoughnessLoc(-1), uFogColorLoc(-1),
           uSkyInvVPLoc(-1), uSkyZenithLoc(-1),
           uSkyHorizonLoc(-1), uSkyGroundLoc(-1),
           uSkySunDirLoc(-1), uSkySunColLoc(-1),
@@ -194,7 +195,13 @@ public:
         }
     }
 
-    void SetGlobalUniforms(const Vec3& sunDir, const ColorRGB& sunColor, const ColorRGB& ambientColor, const Vec3& camPos) {
+    void SetGlobalUniforms(
+        const Vec3& sunDir,
+        const ColorRGB& sunColor,
+        const ColorRGB& ambientColor,
+        const Vec3& camPos,
+        const ColorRGB& fogColor = ColorRGB(0.02f, 0.03f, 0.05f))
+    {
         if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized) return;
 
         glUseProgram(pbrProg);
@@ -202,6 +209,9 @@ public:
         glUniform3f(uSunColorLoc, sunColor.r, sunColor.g, sunColor.b);
         glUniform3f(uAmbientColorLoc, ambientColor.r, ambientColor.g, ambientColor.b);
         glUniform3f(uCamPosLoc, camPos.x, camPos.y, camPos.z);
+        if (uFogColorLoc != -1) {
+            glUniform3f(uFogColorLoc, fogColor.r, fogColor.g, fogColor.b);
+        }
     }
 
     void RenderMesh(
@@ -457,6 +467,7 @@ uniform float uMetallic;
 uniform float uRoughness;
 uniform sampler2D uAlbedoMap;
 uniform int uHasTexture;
+uniform vec3 uFogColor;
 
 const float PI = 3.14159265359;
 
@@ -526,23 +537,23 @@ void main() {
     vec3 directLight = (kD * albedo / PI + specular) * uSunColor * NdotL;
     vec3 ambient = uAmbientColor * albedo;
 
-    // 1. Floor Ambient Bounce (prevents pitch-black under-surfaces)
+    // 1. Floor Ambient Bounce (subtle under-surface bounce, scaled by ambient)
     float groundBounce = max(-N.y * 0.5 + 0.5, 0.0);
-    vec3 bounceLight = vec3(0.08, 0.07, 0.12) * groundBounce * albedo;
+    vec3 bounceLight = uAmbientColor * 0.20 * groundBounce * albedo;
 
-    // 2. Fresnel Rim Lighting (vibrant cyberpunk silhouette glow on character & geometry edges)
+    // 2. Silhouette Rim Lighting (only on steep vertical edges, never on flat road/floors)
+    float vertMask = clamp(1.0 - abs(N.y) * 1.6, 0.0, 1.0);
     float NdotV = max(dot(N, V), 0.0);
-    float rimFactor = pow(clamp(1.0 - NdotV, 0.0, 1.0), 3.2);
-    vec3 rimLight = vec3(0.35, 0.65, 1.0) * rimFactor * 0.45;
+    float rimFactor = pow(clamp(1.0 - NdotV, 0.0, 1.0), 3.5) * vertMask;
+    vec3 rimLight = mix(uAmbientColor * 1.5, uSunColor, 0.4) * rimFactor * 0.30;
 
     vec3 color = ambient + directLight + bounceLight + rimLight;
 
-    // 3. Atmospheric Distance Depth Fog (Extended range for expansive metropolis view)
+    // 3. Atmospheric Distance Depth Fog (blends seamlessly into current sky horizon)
     float dist = length(uCamPos - vFragPos);
-    float fogFactor = clamp((dist - 35.0) / 185.0, 0.0, 1.0);
+    float fogFactor = clamp((dist - 40.0) / 180.0, 0.0, 1.0);
     fogFactor = smoothstep(0.0, 1.0, fogFactor);
-    vec3 fogColor = uAmbientColor * 0.40 + vec3(0.01, 0.015, 0.03);
-    color = mix(color, fogColor, fogFactor);
+    color = mix(color, uFogColor, fogFactor);
 
     // 4. ACES Filmic Tone Mapping (professional cinematic contrast)
     vec3 a = color * (2.51 * color + vec3(0.03));
@@ -579,6 +590,7 @@ void main() {
         uRoughnessLoc = glGetUniformLocation(pbrProg, "uRoughness");
         uAlbedoMapLoc = glGetUniformLocation(pbrProg, "uAlbedoMap");
         uHasTextureLoc = glGetUniformLocation(pbrProg, "uHasTexture");
+        uFogColorLoc = glGetUniformLocation(pbrProg, "uFogColor");
 
         // 3. Fullscreen Quad Blit Shader
         const char* qVS = R"(
@@ -659,9 +671,15 @@ void main() {
         // Sun / Moon Disc & Atmospheric Corona
         vec3 sDir = normalize(uSunDir);
         float sunDot = max(dot(ray, sDir), 0.0);
-        float sunDisc = pow(sunDot, 320.0) * 1.8;
-        float sunGlow = pow(sunDot, 14.0) * 0.35;
-        sky += (sunDisc + sunGlow) * uSunColor;
+        if (uIsNight > 0.5) {
+            float moonDisc = pow(sunDot, 512.0) * 1.5;
+            float moonGlow = pow(sunDot, 48.0) * 0.10;
+            sky += (moonDisc + moonGlow) * uSunColor;
+        } else {
+            float sunDisc = pow(sunDot, 320.0) * 1.8;
+            float sunGlow = pow(sunDot, 14.0) * 0.35;
+            sky += (sunDisc + sunGlow) * uSunColor;
+        }
 
         // Twinkling stars in night mode
         if (uIsNight > 0.5) {
