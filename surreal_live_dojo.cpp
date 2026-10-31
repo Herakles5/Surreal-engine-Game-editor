@@ -438,7 +438,7 @@ int main(int argc, char* argv[]) {
         {"Cyberpunk Nacht (Night)",
          Surreal::Vec3(-0.35f, 0.85f, -0.40f).Normalized(),
          Surreal::ColorRGB(0.25f, 0.38f, 0.65f), 0.15f,
-         Surreal::ColorRGB(0.016f, 0.020f, 0.035f),
+         Surreal::ColorRGB(0.032f, 0.038f, 0.052f),
          Surreal::ColorRGB(0.002f, 0.003f, 0.008f),
          Surreal::ColorRGB(0.008f, 0.014f, 0.028f),
          Surreal::ColorRGB(0.005f, 0.007f, 0.012f),
@@ -1093,12 +1093,29 @@ int main(int argc, char* argv[]) {
             // --- GPU HARDWARE OPENGL 4.6 PIPELINE ---
             const auto& curSky = skyProfiles[currentSkyProfile % 4];
             hybridRenderer.BeginFrame(curSky.horizonColor);
+
+            std::vector<Surreal::PointLight> activePointLights;
+            if (curSky.isNight) {
+                // Street lamps along the boulevard (warm sodium & neon)
+                activePointLights.push_back({Surreal::Vec3(0.0f, 4.6f, 2.2f), Surreal::ColorRGB(3.2f, 2.4f, 1.4f), 1.0f, 24.0f});
+                activePointLights.push_back({Surreal::Vec3(-9.3f, 4.6f, 7.8f), Surreal::ColorRGB(3.0f, 2.3f, 1.4f), 1.0f, 24.0f});
+                activePointLights.push_back({Surreal::Vec3(16.5f, 4.6f, 2.2f), Surreal::ColorRGB(3.0f, 2.3f, 1.4f), 1.0f, 24.0f});
+                activePointLights.push_back({Surreal::Vec3(-16.5f, 4.6f, 2.2f), Surreal::ColorRGB(1.6f, 2.6f, 3.8f), 1.0f, 22.0f}); // Cyan neon lamp
+                activePointLights.push_back({Surreal::Vec3(8.9f, 4.6f, 7.8f), Surreal::ColorRGB(3.4f, 1.5f, 2.8f), 1.0f, 22.0f});  // Magenta arcade neon
+                activePointLights.push_back({Surreal::Vec3(-26.5f, 4.6f, 7.8f), Surreal::ColorRGB(3.0f, 2.3f, 1.4f), 1.0f, 24.0f});
+                activePointLights.push_back({Surreal::Vec3(4.2f, 6.2f, -3.8f), Surreal::ColorRGB(2.6f, 1.4f, 3.5f), 1.0f, 25.0f}); // Church cross neon
+                // Avatar personal flashlight / aura fill
+                activePointLights.push_back({Surreal::Vec3(charPos.x, charPos.y + 1.6f, charPos.z + 0.3f), Surreal::ColorRGB(1.4f, 1.6f, 2.0f), 1.0f, 9.5f});
+            }
+
             hybridRenderer.SetGlobalUniforms(
                 engine.world.sunLight.direction,
                 engine.world.sunLight.color * engine.world.sunLight.intensity,
                 engine.world.ambientLight,
                 engine.cameraPos,
-                curSky.horizonColor
+                curSky.horizonColor,
+                totalAppTime,
+                activePointLights
             );
 
             Surreal::Mat4 vpMat = engine.GetProjectionMatrix() * engine.GetViewMatrix();

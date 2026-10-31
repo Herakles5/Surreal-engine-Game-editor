@@ -72,6 +72,8 @@ struct SubMesh {
     uint32_t indexOffset = 0;
     uint32_t indexCount = 0;
     ColorRGB albedo = ColorRGB(1.0f, 1.0f, 1.0f);
+    ColorRGB emissive = ColorRGB(0.0f, 0.0f, 0.0f);
+    float emissiveStrength = 1.0f;
     float metallic = 0.2f;
     float roughness = 0.5f;
     uint32_t textureId = 0;

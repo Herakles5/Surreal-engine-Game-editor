@@ -66,6 +66,12 @@ public:
     GLint uAlbedoLoc;
     GLint uMetallicLoc;
     GLint uRoughnessLoc;
+    GLint uEmissiveLoc;
+    GLint uTimeLoc;
+    GLint uNumPointLightsLoc;
+    GLint uPointLightPosLoc;
+    GLint uPointLightColLoc;
+    GLint uPointLightRadiusLoc;
     GLint uAlbedoMapLoc;
     GLint uHasTextureLoc;
     GLint uFogColorLoc;
@@ -99,7 +105,10 @@ public:
           uSunDirLoc(-1), uSunColorLoc(-1),
           uAmbientColorLoc(-1), uCamPosLoc(-1),
           uAlbedoLoc(-1), uMetallicLoc(-1),
-          uRoughnessLoc(-1), uFogColorLoc(-1),
+          uRoughnessLoc(-1), uEmissiveLoc(-1),
+          uTimeLoc(-1), uNumPointLightsLoc(-1),
+          uPointLightPosLoc(-1), uPointLightColLoc(-1),
+          uPointLightRadiusLoc(-1), uFogColorLoc(-1),
           uSkyInvVPLoc(-1), uSkyZenithLoc(-1),
           uSkyHorizonLoc(-1), uSkyGroundLoc(-1),
           uSkySunDirLoc(-1), uSkySunColLoc(-1),
@@ -200,7 +209,9 @@ public:
         const ColorRGB& sunColor,
         const ColorRGB& ambientColor,
         const Vec3& camPos,
-        const ColorRGB& fogColor = ColorRGB(0.02f, 0.03f, 0.05f))
+        const ColorRGB& fogColor = ColorRGB(0.02f, 0.03f, 0.05f),
+        float timeSec = 0.0f,
+        const std::vector<PointLight>& pointLights = {})
     {
         if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized) return;
 
@@ -211,6 +222,33 @@ public:
         glUniform3f(uCamPosLoc, camPos.x, camPos.y, camPos.z);
         if (uFogColorLoc != -1) {
             glUniform3f(uFogColorLoc, fogColor.r, fogColor.g, fogColor.b);
+        }
+        if (uTimeLoc != -1) {
+            glUniform1f(uTimeLoc, timeSec);
+        }
+        if (uNumPointLightsLoc != -1) {
+            int numLights = std::min(static_cast<int>(pointLights.size()), 8);
+            glUniform1i(uNumPointLightsLoc, numLights);
+            if (numLights > 0) {
+                float posArray[24];
+                float colArray[24];
+                float radArray[8];
+                for (int i = 0; i < numLights; ++i) {
+                    posArray[i * 3 + 0] = pointLights[i].position.x;
+                    posArray[i * 3 + 1] = pointLights[i].position.y;
+                    posArray[i * 3 + 2] = pointLights[i].position.z;
+
+                    float intens = pointLights[i].intensity > 0.0f ? pointLights[i].intensity : 1.0f;
+                    colArray[i * 3 + 0] = pointLights[i].color.r * intens;
+                    colArray[i * 3 + 1] = pointLights[i].color.g * intens;
+                    colArray[i * 3 + 2] = pointLights[i].color.b * intens;
+
+                    radArray[i] = pointLights[i].radius > 0.0f ? pointLights[i].radius : 20.0f;
+                }
+                glUniform3fv(uPointLightPosLoc, numLights, posArray);
+                glUniform3fv(uPointLightColLoc, numLights, colArray);
+                glUniform1fv(uPointLightRadiusLoc, numLights, radArray);
+            }
         }
     }
 
@@ -281,6 +319,9 @@ public:
             glUniform3f(uAlbedoLoc, material.albedo.r, material.albedo.g, material.albedo.b);
             glUniform1f(uMetallicLoc, material.metallic);
             glUniform1f(uRoughnessLoc, material.roughness);
+            if (uEmissiveLoc != -1) {
+                glUniform3f(uEmissiveLoc, material.emissive.r, material.emissive.g, material.emissive.b);
+            }
             glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(it->second.indexCount), GL_UNSIGNED_INT, 0);
         } else {
             glActiveTexture(GL_TEXTURE0);
@@ -313,6 +354,14 @@ public:
                 glUniform3f(uAlbedoLoc, effectiveAlbedo.r, effectiveAlbedo.g, effectiveAlbedo.b);
                 glUniform1f(uMetallicLoc, sub.metallic);
                 glUniform1f(uRoughnessLoc, sub.roughness);
+
+                if (uEmissiveLoc != -1) {
+                    ColorRGB effectiveEmissive = sub.emissive;
+                    if (effectiveEmissive.r == 0 && effectiveEmissive.g == 0 && effectiveEmissive.b == 0) {
+                        effectiveEmissive = material.emissive;
+                    }
+                    glUniform3f(uEmissiveLoc, effectiveEmissive.r, effectiveEmissive.g, effectiveEmissive.b);
+                }
 
                 glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sub.indexCount), GL_UNSIGNED_INT,
                                reinterpret_cast<const void*>(static_cast<uintptr_t>(sub.indexOffset * sizeof(uint32_t))));
@@ -465,9 +514,18 @@ uniform vec3 uCamPos;
 uniform vec3 uAlbedo;
 uniform float uMetallic;
 uniform float uRoughness;
+uniform vec3 uEmissive;
 uniform sampler2D uAlbedoMap;
 uniform int uHasTexture;
 uniform vec3 uFogColor;
+uniform float uTime;
+
+// Multi-Point Lights (Street lamps, storefront neon, player aura)
+const int MAX_POINT_LIGHTS = 8;
+uniform int uNumPointLights;
+uniform vec3 uPointLightPos[8];
+uniform vec3 uPointLightCol[8];
+uniform float uPointLightRadius[8];
 
 const float PI = 3.14159265359;
 
@@ -505,8 +563,9 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 void main() {
     float alpha = vColor.a;
     vec3 baseAlbedo = uAlbedo * vColor.rgb;
+    vec4 texSample = vec4(1.0);
     if (uHasTexture == 1) {
-        vec4 texSample = texture(uAlbedoMap, vTexCoord);
+        texSample = texture(uAlbedoMap, vTexCoord);
         if (texSample.a < 0.15) discard; // Alpha cutout for foliage, leaves & grates
         baseAlbedo *= texSample.rgb;
         alpha *= texSample.a;
@@ -516,46 +575,135 @@ void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCamPos - vFragPos);
     vec3 L = normalize(uSunDir);
-    vec3 H = normalize(V + L);
+    float NdotV = max(dot(N, V), 0.0);
+
+    // =========================================================================
+    // WET ASPHALT & WATER PUDDLE SIMULATION (Ground Puddles & Screen Reflections)
+    // =========================================================================
+    // Detect ground surfaces (flat horizontal surfaces near ground level)
+    float isGround = step(abs(vFragPos.y), 0.65) * step(0.70, N.y);
+    float puddleScale = 0.38;
+    float pn1 = sin(vFragPos.x * puddleScale) * cos(vFragPos.z * (puddleScale * 1.28));
+    float pn2 = sin(vFragPos.x * (puddleScale * 2.1) + 1.8) * cos(vFragPos.z * (puddleScale * 1.7) + 2.9);
+    float pn3 = sin(vFragPos.x * (puddleScale * 4.3) + 3.7) * cos(vFragPos.z * (puddleScale * 3.9) + 0.8);
+    float puddleNoise = (pn1 * 0.50 + pn2 * 0.35 + pn3 * 0.15) * 0.5 + 0.5;
+
+    // Organic water puddles with wet gradient fringes
+    float puddle = smoothstep(0.48, 0.68, puddleNoise) * isGround;
+    float wetFringe = smoothstep(0.38, 0.52, puddleNoise) * isGround;
+
+    // Wet surfaces darken significantly
+    albedo = mix(albedo, albedo * 0.35, wetFringe * 0.75 + puddle * 0.25);
+
+    // Roughness: dry asphalt is rough (~0.8), puddles become mirror-smooth (0.02)
+    float roughness = mix(uRoughness, 0.02, puddle);
+
+    // Normal: in puddles, water levels out flat with subtle ripples
+    vec3 effN = N;
+    if (puddle > 0.01) {
+        float ripple = (sin(vFragPos.x * 20.0 + uTime * 2.8) + cos(vFragPos.z * 20.0 + uTime * 2.2)) * 0.018 * puddle;
+        effN = normalize(mix(N, vec3(ripple, 1.0, -ripple), puddle * 0.88));
+    }
 
     vec3 F0 = vec3(0.04);
     F0 = mix(F0, albedo, uMetallic);
 
-    float NDF = DistributionGGX(N, H, uRoughness);
-    float G = GeometrySmith(N, V, L, uRoughness);
+    // 1. Sun / Moon Directional Direct Light (Cook-Torrance GGX)
+    vec3 H = normalize(V + L);
+    float NDF = DistributionGGX(effN, H, roughness);
+    float G = GeometrySmith(effN, V, L, roughness);
     vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
 
     vec3 kS = F;
-    vec3 kD = vec3(1.0) - kS;
-    kD *= 1.0 - uMetallic;
+    vec3 kD = (vec3(1.0) - kS) * (1.0 - uMetallic);
+    vec3 specular = (NDF * G * F) / (4.0 * max(dot(effN, V), 0.0) * max(dot(effN, L), 0.0) + 0.0001);
 
-    vec3 numerator = NDF * G * F;
-    float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-    vec3 specular = numerator / denominator;
-
-    float NdotL = max(dot(N, L), 0.0);
+    float NdotL = max(dot(effN, L), 0.0);
     vec3 directLight = (kD * albedo / PI + specular) * uSunColor * NdotL;
+
+    // 2. Multi-Point Lights: Street Lamps, Neon Spotlights, and Player Aura
+    vec3 pointLightAccum = vec3(0.0);
+    for (int i = 0; i < uNumPointLights && i < MAX_POINT_LIGHTS; ++i) {
+        vec3 pLightDir = uPointLightPos[i] - vFragPos;
+        float pDist = length(pLightDir);
+        if (pDist >= uPointLightRadius[i]) continue;
+
+        vec3 pL = pLightDir / max(pDist, 0.001);
+        vec3 pH = normalize(V + pL);
+
+        // Smooth quadratic attenuation
+        float pNormDist = pDist / uPointLightRadius[i];
+        float pAtten = clamp(1.0 - pNormDist * pNormDist, 0.0, 1.0);
+        pAtten = (pAtten * pAtten) / (1.0 + 0.15 * pDist);
+
+        float pNdotL = max(dot(effN, pL), 0.0);
+        float pNDF = DistributionGGX(effN, pH, roughness);
+        float pG = GeometrySmith(effN, V, pL, roughness);
+        vec3 pF = fresnelSchlick(max(dot(pH, V), 0.0), F0);
+
+        vec3 pkS = pF;
+        vec3 pkD = (vec3(1.0) - pkS) * (1.0 - uMetallic);
+        vec3 pSpecular = (pNDF * pG * pF) / (4.0 * max(dot(effN, V), 0.0) * pNdotL + 0.0001);
+
+        pointLightAccum += (pkD * albedo / PI + pSpecular) * uPointLightCol[i] * pNdotL * pAtten;
+    }
+
+    // 3. Ambient & Environment Illumination
     vec3 ambient = uAmbientColor * albedo;
+    float groundBounce = max(-effN.y * 0.5 + 0.5, 0.0);
+    vec3 bounceLight = uAmbientColor * 0.25 * groundBounce * albedo;
 
-    // 1. Floor Ambient Bounce (subtle under-surface bounce, scaled by ambient)
-    float groundBounce = max(-N.y * 0.5 + 0.5, 0.0);
-    vec3 bounceLight = uAmbientColor * 0.20 * groundBounce * albedo;
-
-    // 2. Silhouette Rim Lighting (only on steep vertical edges, never on flat road/floors)
+    // 4. Vertical Silhouette Rim Lighting
     float vertMask = clamp(1.0 - abs(N.y) * 1.6, 0.0, 1.0);
-    float NdotV = max(dot(N, V), 0.0);
     float rimFactor = pow(clamp(1.0 - NdotV, 0.0, 1.0), 3.5) * vertMask;
     vec3 rimLight = mix(uAmbientColor * 1.5, uSunColor, 0.4) * rimFactor * 0.30;
 
-    vec3 color = ambient + directLight + bounceLight + rimLight;
+    // 5. Water Puddle Mirror Reflections (Spiegelungen)
+    vec3 puddleReflection = vec3(0.0);
+    if (puddle > 0.01) {
+        vec3 R = reflect(-V, effN);
+        vec3 waterFresnel = fresnelSchlick(max(dot(effN, V), 0.0), vec3(0.04));
 
-    // 3. Atmospheric Distance Depth Fog (blends seamlessly into current sky horizon)
+        // a) Night sky dome & celestial gradient reflection
+        vec3 skyReflect = mix(uFogColor * 1.3, vec3(0.02, 0.035, 0.075), clamp(R.y, 0.0, 1.0));
+
+        // b) Moon specular beam across wet street
+        float moonShimmer = pow(max(dot(R, L), 0.0), 180.0) * 3.5;
+        skyReflect += uSunColor * moonShimmer;
+
+        // c) Street lamps & neon reflection beams stretched across wet puddles
+        for (int i = 0; i < uNumPointLights && i < MAX_POINT_LIGHTS; ++i) {
+            vec3 toPl = normalize(uPointLightPos[i] - vFragPos);
+            float distPl = length(uPointLightPos[i] - vFragPos);
+            float attenPl = clamp(1.0 - (distPl / uPointLightRadius[i]), 0.0, 1.0);
+            float lampMirror = pow(max(dot(R, toPl), 0.0), 96.0) * 3.2;
+            skyReflect += uPointLightCol[i] * lampMirror * attenPl;
+        }
+
+        // d) City skyline & neon horizon glow reflected at glancing angles
+        float horizonGlow = smoothstep(0.0, 0.25, R.y) * smoothstep(0.75, 0.0, R.y);
+        vec3 neonHorizon = vec3(0.12, 0.08, 0.18) * horizonGlow;
+        skyReflect += neonHorizon;
+
+        puddleReflection = skyReflect * waterFresnel * puddle;
+    }
+
+    // 6. Emissive Radiant Glow (Windows, Shop signs, Neon billboards, Street lamp bulbs)
+    vec3 emissiveLight = uEmissive;
+    if (uHasTexture == 1 && length(uEmissive) > 0.01) {
+        // Multiplies the colorful storefront / neon texture content
+        emissiveLight = texSample.rgb * uEmissive * 1.6;
+    }
+
+    vec3 color = ambient + directLight + pointLightAccum + bounceLight + rimLight + puddleReflection + emissiveLight;
+
+    // 7. Atmospheric Distance Depth Fog
     float dist = length(uCamPos - vFragPos);
     float fogFactor = clamp((dist - 40.0) / 180.0, 0.0, 1.0);
     fogFactor = smoothstep(0.0, 1.0, fogFactor);
     color = mix(color, uFogColor, fogFactor);
 
-    // 4. ACES Filmic Tone Mapping (professional cinematic contrast)
+    // 8. ACES Filmic Tone Mapping (Professional cinematic contrast)
     vec3 a = color * (2.51 * color + vec3(0.03));
     vec3 b = color * (2.43 * color + vec3(0.59)) + vec3(0.14);
     color = clamp(a / b, 0.0, 1.0);
@@ -588,6 +736,12 @@ void main() {
         uAlbedoLoc = glGetUniformLocation(pbrProg, "uAlbedo");
         uMetallicLoc = glGetUniformLocation(pbrProg, "uMetallic");
         uRoughnessLoc = glGetUniformLocation(pbrProg, "uRoughness");
+        uEmissiveLoc = glGetUniformLocation(pbrProg, "uEmissive");
+        uTimeLoc = glGetUniformLocation(pbrProg, "uTime");
+        uNumPointLightsLoc = glGetUniformLocation(pbrProg, "uNumPointLights");
+        uPointLightPosLoc = glGetUniformLocation(pbrProg, "uPointLightPos");
+        uPointLightColLoc = glGetUniformLocation(pbrProg, "uPointLightCol");
+        uPointLightRadiusLoc = glGetUniformLocation(pbrProg, "uPointLightRadius");
         uAlbedoMapLoc = glGetUniformLocation(pbrProg, "uAlbedoMap");
         uHasTextureLoc = glGetUniformLocation(pbrProg, "uHasTexture");
         uFogColorLoc = glGetUniformLocation(pbrProg, "uFogColor");

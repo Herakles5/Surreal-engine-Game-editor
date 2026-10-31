@@ -581,24 +581,61 @@ public:
                     float uvScale[2] = {1.0f, 1.0f};
                     float uvOffset[2] = {0.0f, 0.0f};
 
-                    if (prim.material && prim.material->has_pbr_metallic_roughness) {
-                        const auto& pbr = prim.material->pbr_metallic_roughness;
-                        sub.albedo = ColorRGB(pbr.base_color_factor[0], pbr.base_color_factor[1], pbr.base_color_factor[2]);
-                        sub.metallic = pbr.metallic_factor;
-                        sub.roughness = pbr.roughness_factor;
+                    if (prim.material) {
+                        sub.emissive = ColorRGB(
+                            prim.material->emissive_factor[0],
+                            prim.material->emissive_factor[1],
+                            prim.material->emissive_factor[2]
+                        );
+                        if (prim.material->has_emissive_strength) {
+                            sub.emissiveStrength = prim.material->emissive_strength.emissive_strength;
+                        }
 
-                        if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
-                            RawTex rt = getTex(pbr.base_color_texture.texture->image);
-                            sub.texWidth = rt.w;
-                            sub.texHeight = rt.h;
-                            sub.texRGBA = rt.rgba;
+                        if (prim.material->has_pbr_metallic_roughness) {
+                            const auto& pbr = prim.material->pbr_metallic_roughness;
+                            sub.albedo = ColorRGB(pbr.base_color_factor[0], pbr.base_color_factor[1], pbr.base_color_factor[2]);
+                            sub.metallic = pbr.metallic_factor;
+                            sub.roughness = pbr.roughness_factor;
 
-                            if (pbr.base_color_texture.has_transform) {
-                                hasUvTransform = true;
-                                uvScale[0] = pbr.base_color_texture.transform.scale[0];
-                                uvScale[1] = pbr.base_color_texture.transform.scale[1];
-                                uvOffset[0] = pbr.base_color_texture.transform.offset[0];
-                                uvOffset[1] = pbr.base_color_texture.transform.offset[1];
+                            if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
+                                RawTex rt = getTex(pbr.base_color_texture.texture->image);
+                                sub.texWidth = rt.w;
+                                sub.texHeight = rt.h;
+                                sub.texRGBA = rt.rgba;
+
+                                if (pbr.base_color_texture.has_transform) {
+                                    hasUvTransform = true;
+                                    uvScale[0] = pbr.base_color_texture.transform.scale[0];
+                                    uvScale[1] = pbr.base_color_texture.transform.scale[1];
+                                    uvOffset[0] = pbr.base_color_texture.transform.offset[0];
+                                    uvOffset[1] = pbr.base_color_texture.transform.offset[1];
+                                }
+                            }
+                        }
+
+                        // Calibrate glowing elements: shop windows, neon signs, and street lamps
+                        if (prim.material->name) {
+                            std::string matName = prim.material->name;
+                            for (char& c : matName) c = tolower(c);
+
+                            if (matName.find("windows2") != std::string::npos ||
+                                matName.find("windows3") != std::string::npos ||
+                                matName.find("wiindos") != std::string::npos) {
+                                sub.emissive = ColorRGB(1.8f, 1.55f, 1.15f); // Warm interior room/shop lighting
+                                sub.emissiveStrength = 2.0f;
+                            } else if (matName.find("material.025") != std::string::npos ||
+                                       matName.find("lamp") != std::string::npos ||
+                                       matName.find("lantern") != std::string::npos ||
+                                       matName.find("light") != std::string::npos) {
+                                sub.emissive = ColorRGB(5.5f, 4.2f, 2.2f); // Intense street lamp bulb glow
+                                sub.emissiveStrength = 4.0f;
+                            } else if (matName.find("material.035") != std::string::npos ||
+                                       matName.find("material.026") != std::string::npos ||
+                                       matName.find("sign") != std::string::npos ||
+                                       matName.find("billboard") != std::string::npos ||
+                                       matName.find("neon") != std::string::npos) {
+                                sub.emissive = ColorRGB(3.0f, 2.6f, 2.2f); // Radiant storefront signage & billboard
+                                sub.emissiveStrength = 2.5f;
                             }
                         }
                     }
