@@ -1041,7 +1041,7 @@ public:
         sub.metallic = 0.05f;
         sub.texWidth = atlasW;
         sub.texHeight = atlasH;
-        sub.texRGBA = std::move(atlasRGBA);
+        sub.texRGBA = std::make_shared<std::vector<uint8_t>>(std::move(atlasRGBA));
         mesh->submeshes.push_back(std::move(sub));
 
         mesh->CalculateBounds();

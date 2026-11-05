@@ -628,6 +628,7 @@ public:
 
         inst->activeDeformedMesh->indices = sourceMesh->indices;
         inst->activeDeformedMesh->vertices = sourceMesh->vertices;
+        inst->activeDeformedMesh->submeshes = sourceMesh->submeshes;
         inst->activeDeformedMesh->CalculateBounds();
         inst->clips = GenerateProceduralClips(figureSeed);
         inst->PlayClip(0);

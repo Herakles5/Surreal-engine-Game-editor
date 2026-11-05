@@ -1057,7 +1057,7 @@ public:
         }
 
         Image3DOptions opt;
-        opt.ironingPasses = 120;
+        opt.ironingPasses = 1440;
         opt.heightMeters = 2.20f;
         auto figures = SurrealAutoRigger::SegmentGroupAndRig(groupImagePath, opt, spacingOffset);
         if (figures.empty()) {

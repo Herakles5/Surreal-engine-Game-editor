@@ -874,11 +874,11 @@ int main(int argc, char* argv[]) {
                 bool genBackside = getJsonInt("generate_backside", 1) != 0;
                 bool anatSmooth = getJsonInt("anatomical_smooth", 1) != 0;
                 float bodyVol = getJsonFloat("body_volume", 1.0f);
-                int ironPasses = getJsonInt("ironing_passes", 120);
+                int ironPasses = getJsonInt("ironing_passes", 1440);
 
                 if (!modelPath.empty()) {
                     Surreal::Image3DOptions userOpt;
-                    userOpt.maxRes = 280;
+                    userOpt.maxRes = 320;
                     userOpt.mode = mode;
                     userOpt.depth = depth;
                     userOpt.relief = relief;
@@ -886,7 +886,7 @@ int main(int argc, char* argv[]) {
                     userOpt.generateBackside = genBackside;
                     userOpt.anatomicalSmooth = anatSmooth;
                     userOpt.bodyVolume = bodyVol;
-                    userOpt.ironingPasses = std::max(20, std::min(300, ironPasses));
+                    userOpt.ironingPasses = std::max(120, std::min(1440, ironPasses));
 
                     std::cout << "[*] High-Precision 3D Model Generation requested for: " << modelPath << "\n";
                     if (editor.LoadModelFromPath(modelPath, userOpt)) {
