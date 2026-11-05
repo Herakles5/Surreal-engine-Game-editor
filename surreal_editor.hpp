@@ -990,9 +990,12 @@ public:
     }
 
     uint64_t animFrameCounter = 0;
+    float meovvChoreoClock = 0.0f;
+    bool meovvStageChoreoActive = true;
 
-    void UpdateAnimations(float dt, const SurrealWorld* world = nullptr, const Frustum* camFrustum = nullptr, const Vec3* camPos = nullptr) {
+    void UpdateAnimations(float dt, SurrealWorld* world = nullptr, const Frustum* camFrustum = nullptr, const Vec3* camPos = nullptr) {
         ++animFrameCounter;
+        meovvChoreoClock += dt;
         size_t idx = 0;
         for (auto& pair : animatedEntities) {
             auto& skel = pair.second;
@@ -1005,8 +1008,64 @@ public:
                 continue;
             }
 
+            bool isMeovvDancer = false;
+            int meovvMemberIdx = 0;
+            EditableEntity* edPtr = nullptr;
+            for (auto& ed : entities) {
+                if (ed.id == pair.first) {
+                    edPtr = &ed;
+                    if (ed.name.find("MEOVV_") != std::string::npos || ed.name.find("meovv") != std::string::npos) {
+                        isMeovvDancer = true;
+                        if (ed.name.find("_1_") != std::string::npos) meovvMemberIdx = 0;
+                        else if (ed.name.find("_2_") != std::string::npos) meovvMemberIdx = 1;
+                        else if (ed.name.find("_3_") != std::string::npos) meovvMemberIdx = 2;
+                        else if (ed.name.find("_4_") != std::string::npos) meovvMemberIdx = 3;
+                        else if (ed.name.find("_5_") != std::string::npos) meovvMemberIdx = 4;
+                    }
+                    break;
+                }
+            }
+
+            // Live Stage Formation & Stepping Choreography for the 5 MEOVV Dancers
+            if (isMeovvDancer && edPtr && world) {
+                auto itTr = world->transforms.find(pair.first);
+                if (itTr != world->transforms.end()) {
+                    int clipIdx = skel->activeClipIndex;
+                    if (mode == EditorMode::PLAY_MODE && meovvStageChoreoActive && clipIdx >= 0 && clipIdx < 3) {
+                        float t = meovvChoreoClock;
+                        float phase = static_cast<float>(meovvMemberIdx) * 0.65f;
+                        float dx = 0.0f, dy = 0.0f, dz = 0.0f, dYaw = 0.0f;
+
+                        if (clipIdx == 0) {
+                            // Clip 0: KPop_MeovvChoreo — Synchronized K-Pop V-Formation Glide & Chorus Step
+                            dx   = std::sin(t * 2.2f) * 0.24f + std::cos(t * 1.1f + phase) * 0.10f;
+                            dz   = std::sin(t * 1.1f + phase) * 0.22f;
+                            dy   = std::max(0.0f, std::sin(t * 4.4f + phase * 0.5f)) * 0.025f;
+                            dYaw = std::sin(t * 2.2f + phase * 0.4f) * 0.20f;
+                        } else if (clipIdx == 1) {
+                            // Clip 1: KPop_HipHopGroove — High-Energy Urban Bounce & Stage Orbit
+                            dx   = std::sin(t * 2.8f + phase * 0.5f) * 0.32f;
+                            dz   = std::cos(t * 1.4f + phase) * 0.28f;
+                            dy   = std::max(0.0f, std::sin(t * 5.6f + phase * 0.3f)) * 0.045f;
+                            dYaw = std::cos(t * 2.8f + phase * 0.5f) * 0.26f;
+                        } else if (clipIdx == 2) {
+                            // Clip 2: KPop_CatwalkWave — Runway Promenade Forward & Back
+                            dx   = std::sin(t * 2.4f + phase) * 0.14f;
+                            dz   = std::sin(t * 1.2f + phase * 0.4f) * 0.62f;
+                            dYaw = std::sin(t * 2.4f + phase) * 0.16f;
+                        }
+
+                        itTr->second.position = edPtr->position + Vec3(dx, dy, dz);
+                        itTr->second.rotation = Quat::FromAxisAngle(Vec3(0, 1.0f, 0), edPtr->yaw + dYaw);
+                    } else {
+                        itTr->second.position = edPtr->position;
+                        itTr->second.rotation = Quat::FromAxisAngle(Vec3(0, 1.0f, 0), edPtr->yaw);
+                    }
+                }
+            }
+
             // Gen 4833/4834 Topological Manifold Pruning: Cull off-screen NPC skeletal deformation
-            if (world && camFrustum) {
+            if (world && camFrustum && !isMeovvDancer) {
                 auto itTr = world->transforms.find(pair.first);
                 if (itTr != world->transforms.end()) {
                     Vec3 center = itTr->second.position + Vec3(0.0f, 0.9f, 0.0f);
@@ -1026,8 +1085,8 @@ public:
                 }
             }
 
-            // 2-Phase Interleaved Topological Cadence for multi-NPC crowds (>2 animated NPCs)
-            if (animatedEntities.size() > 2) {
+            // Always update MEOVV dancers at full 60 FPS cadence; interleave only distant background crowds
+            if (!isMeovvDancer && animatedEntities.size() > 6) {
                 if (((animFrameCounter + idx) & 1) == 0) {
                     skel->Update(dt * 2.0f);
                 }
@@ -1111,9 +1170,34 @@ public:
         return true;
     }
 
+    void CycleAllMeovvAnimations() {
+        int nextClip = -1;
+        std::string clipName = "KPop_MeovvChoreo";
+        for (const auto& ed : entities) {
+            if (ed.name.find("MEOVV_") != std::string::npos || ed.name.find("meovv") != std::string::npos) {
+                auto it = animatedEntities.find(ed.id);
+                if (it != animatedEntities.end() && it->second && !it->second->clips.empty()) {
+                    auto& skel = it->second;
+                    if (nextClip < 0) {
+                        nextClip = (skel->activeClipIndex + 1) % static_cast<int>(skel->clips.size());
+                        clipName = skel->clips[nextClip].name;
+                    }
+                    skel->PlayClip(nextClip, true);
+                }
+            }
+        }
+        if (nextClip >= 0) {
+            SetStatus("[★ MEOVV CHOREO ★] All 5 members dancing: " + clipName + " [M / E]", 4.0f);
+        }
+    }
+
     void CycleSelectedAnimation() {
         EditableEntity* ent = GetSelectedEntity();
         if (!ent) return;
+        if (ent->name.find("MEOVV_") != std::string::npos || ent->name.find("meovv") != std::string::npos) {
+            CycleAllMeovvAnimations();
+            return;
+        }
         auto it = animatedEntities.find(ent->id);
         if (it != animatedEntities.end() && it->second) {
             auto& skel = it->second;

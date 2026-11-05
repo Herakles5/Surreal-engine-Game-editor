@@ -1023,15 +1023,23 @@ int main(int argc, char* argv[]) {
                                         }
                                     }
                                 }
-                                if (!targetPath.empty()) {
+                                if (nearestName.find("MEOVV_") != std::string::npos || nearestName.find("meovv") != std::string::npos) {
+                                    editor.CycleAllMeovvAnimations();
+                                } else if (!targetPath.empty()) {
                                     SetPlayerAvatar(targetPath, engine, character, avatarEntity, editor);
-                                    editor.SetStatus("[★ DANCE DUET ★] Synchronisiere Tanz mit " + nearestName + "!", 4.0f);
+                                    editor.SetStatus("[★ DANCE DUET ★] Synchronized dance with " + nearestName + "!", 4.0f);
                                 } else {
-                                    g_currentAvatarIndex = (g_currentAvatarIndex + 1) % g_availableAvatars.size();
-                                    SetPlayerAvatar(g_availableAvatars[g_currentAvatarIndex].second, engine, character, avatarEntity, editor);
+                                    editor.CycleAllMeovvAnimations();
                                 }
                                 break;
                             }
+                            case SDLK_m:
+                                editor.CycleAllMeovvAnimations();
+                                break;
+                            case SDLK_h:
+                                showSkeletonDebug = !showSkeletonDebug;
+                                editor.SetStatus(showSkeletonDebug ? "[🦴 SKELETON] 20-Joint Rig Bones ON [H]" : "[🦴 SKELETON] Bones OFF [H]", 2.5f);
+                                break;
                             case SDLK_q: playCamera.yaw -= 0.12f; break;
                             case SDLK_LEFT: playCamera.yaw -= 0.08f; break;
                             case SDLK_RIGHT: playCamera.yaw += 0.08f; break;
