@@ -124,16 +124,18 @@ public:
 
         struct MemberDef {
             std::string name;
+            std::string singlePngA;
+            std::string singlePngB;
             float normMin;
             float normMax;
         };
 
         std::vector<MemberDef> members = {
-            {"MEOVV_1_Ella",  0.02f, 0.225f},
-            {"MEOVV_2_Gawon", 0.225f, 0.410f},
-            {"MEOVV_3_Sooin", 0.410f, 0.595f},
-            {"MEOVV_4_Anna",  0.595f, 0.775f},
-            {"MEOVV_5_Narin", 0.775f, 0.985f}
+            {"MEOVV_1_Ella",  "/root/Downloads/meovv_1_ella.png",  "/root/coding/MeinOS/surreal_engine/meovv_1_ella.png",  0.070f, 0.275f},
+            {"MEOVV_2_Gawon", "/root/Downloads/meovv_2_gawon.png", "/root/coding/MeinOS/surreal_engine/meovv_2_gawon.png", 0.275f, 0.405f},
+            {"MEOVV_3_Sooin", "/root/Downloads/meovv_3_sooin.png", "/root/coding/MeinOS/surreal_engine/meovv_3_sooin.png", 0.405f, 0.545f},
+            {"MEOVV_4_Anna",  "/root/Downloads/meovv_4_anna.png",  "/root/coding/MeinOS/surreal_engine/meovv_4_anna.png",  0.545f, 0.665f},
+            {"MEOVV_5_Narin", "/root/Downloads/meovv_5_narin.png", "/root/coding/MeinOS/surreal_engine/meovv_5_narin.png", 0.665f, 0.835f}
         };
 
         float targetH = (opt.heightMeters > 0.5f) ? opt.heightMeters : 2.20f;
@@ -145,8 +147,22 @@ public:
             float zPos = 4.2f + zStagger;
             Vec3 worldPos(xPos, 0.0f, zPos);
 
-            RiggedFigureEntity fig = BuildRubberSuitFromSubImage(
-                rgba, imgW, imgH, def.normMin, def.normMax, def.name, targetH, figIdx, worldPos);
+            RiggedFigureEntity fig;
+            int mW = 0, mH = 0, mCh = 0;
+            unsigned char* mRgba = stbi_load(def.singlePngA.c_str(), &mW, &mH, &mCh, 4);
+            if (!mRgba || mW < 16 || mH < 16) {
+                if (mRgba) stbi_image_free(mRgba);
+                mRgba = stbi_load(def.singlePngB.c_str(), &mW, &mH, &mCh, 4);
+            }
+            if (mRgba && mW >= 16 && mH >= 16) {
+                fig = BuildRubberSuitFromSubImage(
+                    mRgba, mW, mH, 0.0f, 1.0f, def.name, targetH, figIdx, worldPos);
+                stbi_image_free(mRgba);
+            } else {
+                if (mRgba) stbi_image_free(mRgba);
+                fig = BuildRubberSuitFromSubImage(
+                    rgba, imgW, imgH, def.normMin, def.normMax, def.name, targetH, figIdx, worldPos);
+            }
 
             if (fig.mesh && !fig.mesh->vertices.empty()) {
                 result.push_back(fig);
@@ -200,7 +216,7 @@ public:
             px = std::max(0, std::min(imgW - 1, px));
             py = std::max(0, std::min(imgH - 1, py));
             const unsigned char* p = rgba + (py * imgW + px) * 4;
-            if (hasAlpha) return p[3] > 60;
+            if (hasAlpha) return p[3] > 140;
             float dr = (p[0] / 255.0f) - bgR;
             float dg = (p[1] / 255.0f) - bgG;
             float db = (p[2] / 255.0f) - bgB;
