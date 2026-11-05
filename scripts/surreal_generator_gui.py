@@ -466,7 +466,7 @@ class SurrealGeneratorWindow(Gtk.Window):
         self.load_image_preview()
         self.cb_mode.set_active_id("2")
         self.scale_height.set_value(1.80)
-        self.scale_passes.set_value(120.0)
+        self.scale_passes.set_value(1440.0)
         self.lbl_status.set_markup(
             f"<span color='#00ff88'><b>[✓] AI Isolation Complete!</b> All figures extracted without background slab. Ready to generate.</span>"
         )

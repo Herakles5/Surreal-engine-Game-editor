@@ -348,7 +348,7 @@ public:
             for (auto& sub : mesh->submeshes) {
                 if (sub.indexCount == 0) continue;
 
-                // Lazy GPU texture upload
+                // Lazy GPU texture upload with 16x Anisotropic Filtering & Crisp LOD Bias
                 if (sub.textureId == 0 && sub.texRGBA && !sub.texRGBA->empty()) {
                     glGenTextures(1, &sub.textureId);
                     glBindTexture(GL_TEXTURE_2D, sub.textureId);
@@ -356,6 +356,9 @@ public:
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, -0.65f);
+                    // Enable 16x Anisotropic Filtering (GL_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FE)
+                    glTexParameterf(GL_TEXTURE_2D, 0x84FE, 16.0f);
                     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, sub.texWidth, sub.texHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, sub.texRGBA->data());
                     glGenerateMipmap(GL_TEXTURE_2D);
                 }
@@ -590,7 +593,7 @@ void main() {
     if (uHasTexture == 1) {
         texSample = texture(uAlbedoMap, vTexCoord);
         if (texSample.a < 0.15) discard; // Alpha cutout for foliage, leaves & grates
-        baseAlbedo *= texSample.rgb;
+        baseAlbedo *= texSample.rgb * vColor.rgb;
         alpha *= texSample.a;
     } else {
         baseAlbedo *= vColor.rgb;

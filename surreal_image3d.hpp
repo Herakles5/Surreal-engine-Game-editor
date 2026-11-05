@@ -39,7 +39,7 @@
 namespace Surreal {
 
 struct Image3DOptions {
-    int   maxRes           = 280;   // grid cells along the longest picture side
+    int   maxRes           = 320;   // high-density grid cells along the longest picture side
     float heightMeters     = 2.20f; // world height of the resulting model
     float depth            = 0.45f; // half thickness relative to the inflate radius
     float relief           = 0.35f; // strength of luminance detail on the front
@@ -49,7 +49,7 @@ struct Image3DOptions {
     bool  generateBackside = true;  // 360° volumetric backside synthesis (hair, skull, spine, clothes)
     bool  anatomicalSmooth = true;  // Organic body volume without luminance spikes
     float bodyVolume       = 1.0f;  // Protrusion multiplier for foreground subjects
-    int   ironingPasses    = 120;   // Multi-pass geometric smoothing ("buegeln") & texture inpainting ("malen") (mindestens 120x)
+    int   ironingPasses    = 1440;  // Multi-pass geometric smoothing ("buegeln") & 360° texture painting ("malen") (up to 1,440x)
 };
 
 struct Image3DInfo {
@@ -629,16 +629,19 @@ public:
             }
         }
 
-        // ---- 4b. Multi-Pass Geometric Smoothing Relaxation (120x "drueber buegeln") ----
+        // ---- 4b. Multi-Pass Geometric Smoothing Relaxation (Up to 1,440x "drueber buegeln") ----
         // Eliminates polygon faceting, steppings and spiky noise across front & back surfaces
-        int numIronPasses = std::max(120, std::min(300, opt.ironingPasses));
+        int numIronPasses = std::max(120, std::min(1440, opt.ironingPasses));
         std::vector<float> zfSmooth = zf;
         std::vector<float> zbSmooth = zb;
+        std::vector<float> nextZf(N, 0.0f);
+        std::vector<float> nextZb(N, 0.0f);
+        const float invTwoSigmaSq = 1.0f / (2.0f * (Hmax * 0.15f) * (Hmax * 0.15f) + 1e-5f);
+        // Scale per-pass relaxation step so 1,440 passes converge ultra-smoothly without over-flattening volume
+        const float relaxStep = std::min(0.35f, 45.0f / static_cast<float>(numIronPasses));
 
         for (int pass = 0; pass < numIronPasses; ++pass) {
-            std::vector<float> nextZf = zfSmooth;
-            std::vector<float> nextZb = zbSmooth;
-
+            #pragma omp parallel for schedule(static)
             for (int y = 1; y + 1 < gh; ++y) {
                 for (int x = 1; x + 1 < gw; ++x) {
                     int i = y * gw + x;
@@ -650,32 +653,28 @@ public:
                     int nbs[4] = { i - 1, i + 1, i - gw, i + gw };
                     for (int nb : nbs) {
                         if (!fg[nb]) continue;
-                        float diff = std::abs(zfSmooth[nb] - curZf);
-                        float w = std::exp(-(diff * diff) / (2.0f * (Hmax * 0.15f) * (Hmax * 0.15f) + 1e-5f));
+                        float diff = zfSmooth[nb] - curZf;
+                        float w = 1.0f / (1.0f + diff * diff * invTwoSigmaSq);
                         sumZf += zfSmooth[nb] * w;
                         sumWf += w;
                     }
-                    if (sumWf > 0.01f) {
-                        nextZf[i] = curZf + 0.35f * (sumZf / sumWf - curZf);
-                    }
+                    nextZf[i] = (sumWf > 0.01f) ? (curZf + relaxStep * (sumZf / sumWf - curZf)) : curZf;
 
                     // Backside Bilateral Smoothing Relaxation
                     float curZb = zbSmooth[i];
                     float sumZb = 0.0f, sumWb = 0.0f;
                     for (int nb : nbs) {
                         if (!fg[nb]) continue;
-                        float diff = std::abs(zbSmooth[nb] - curZb);
-                        float w = std::exp(-(diff * diff) / (2.0f * (Hmax * 0.15f) * (Hmax * 0.15f) + 1e-5f));
+                        float diff = zbSmooth[nb] - curZb;
+                        float w = 1.0f / (1.0f + diff * diff * invTwoSigmaSq);
                         sumZb += zbSmooth[nb] * w;
                         sumWb += w;
                     }
-                    if (sumWb > 0.01f) {
-                        nextZb[i] = curZb + 0.35f * (sumZb / sumWb - curZb);
-                    }
+                    nextZb[i] = (sumWb > 0.01f) ? (curZb + relaxStep * (sumZb / sumWb - curZb)) : curZb;
                 }
             }
-            zfSmooth = std::move(nextZf);
-            zbSmooth = std::move(nextZb);
+            std::swap(zfSmooth, nextZf);
+            std::swap(zbSmooth, nextZb);
         }
         zf = std::move(zfSmooth);
         zb = std::move(zbSmooth);
