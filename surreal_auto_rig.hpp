@@ -424,7 +424,7 @@ public:
         suitOpt.maxRes = 320;
         suitOpt.ironingPasses = 1440;
         suitOpt.heightMeters = H;
-        suitOpt.thicknessRatio = 0.34f;
+        suitOpt.depth = 0.34f;
         suitOpt.generateBackside = true;
         suitOpt.anatomicalSmooth = true;
         suitOpt.mode = 2; // Force character cutout

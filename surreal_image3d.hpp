@@ -642,7 +642,7 @@ public:
 
         for (int pass = 0; pass < numIronPasses; ++pass) {
             #pragma omp parallel for schedule(static)
-            for (int y = 1; y + 1 < gh; ++y) {
+            for (int y = 1; y < gh - 1; ++y) {
                 for (int x = 1; x + 1 < gw; ++x) {
                     int i = y * gw + x;
                     if (!fg[i]) continue;
@@ -751,7 +751,7 @@ public:
         for (int pass = 0; pass < paintPasses; ++pass) {
             std::vector<float> nextR = backR, nextG = backG, nextB = backB;
             #pragma omp parallel for schedule(static)
-            for (int y = 1; y + 1 < gh; ++y) {
+            for (int y = 1; y < gh - 1; ++y) {
                 float yRel = static_cast<float>(y) / static_cast<float>(gh);
                 if (yRel <= 0.16f) continue; // Keep hair crisp
 
