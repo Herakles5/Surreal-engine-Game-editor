@@ -931,14 +931,17 @@ public:
             Vec4 cB1(backR[cell1] / 255.0f * ao * bDark, backG[cell1] / 255.0f * ao * bDark, backB[cell1] / 255.0f * ao * bDark, 1.0f);
             Vec4 cB2(backR[cell2] / 255.0f * ao * bDark, backG[cell2] / 255.0f * ao * bDark, backB[cell2] / 255.0f * ao * bDark, 1.0f);
 
+            float u1Norm = (x1 + 0.5f) / gw, v1Norm = (y1 + 0.5f) / gh;
+            float u2Norm = (x2 + 0.5f) / gw, v2Norm = (y2 + 0.5f) / gh;
+
             uint32_t vF1 = static_cast<uint32_t>(mesh->vertices.size());
-            mesh->vertices.push_back(Vertex3D(pF1, nOut, (x1 + 0.5f) / gw, (y1 + 0.5f) / gh, cF1));
+            mesh->vertices.push_back(Vertex3D(pF1, nOut, 0.5f * u1Norm, v1Norm, cF1));
             uint32_t vF2 = static_cast<uint32_t>(mesh->vertices.size());
-            mesh->vertices.push_back(Vertex3D(pF2, nOut, (x2 + 0.5f) / gw, (y2 + 0.5f) / gh, cF2));
+            mesh->vertices.push_back(Vertex3D(pF2, nOut, 0.5f * u2Norm, v2Norm, cF2));
             uint32_t vB2 = static_cast<uint32_t>(mesh->vertices.size());
-            mesh->vertices.push_back(Vertex3D(pB2, nOut, 1.0f - (x2 + 0.5f) / gw, (y2 + 0.5f) / gh, cB2));
+            mesh->vertices.push_back(Vertex3D(pB2, nOut, 0.5f + 0.5f * u2Norm, v2Norm, cB2));
             uint32_t vB1 = static_cast<uint32_t>(mesh->vertices.size());
-            mesh->vertices.push_back(Vertex3D(pB1, nOut, 1.0f - (x1 + 0.5f) / gw, (y1 + 0.5f) / gh, cB1));
+            mesh->vertices.push_back(Vertex3D(pB1, nOut, 0.5f + 0.5f * u1Norm, v1Norm, cB1));
 
             // True outward CCW winding:
             // Triangle 1: vF1 -> vF2 -> vB2
@@ -1028,6 +1031,18 @@ public:
                 mesh->vertices[v].normal = n;
             }
         }
+
+        // Attach High-Resolution Dual-Hemisphere RGBA GPU Texture Atlas SubMesh
+        SubMesh sub;
+        sub.indexOffset = 0;
+        sub.indexCount = static_cast<uint32_t>(mesh->indices.size());
+        sub.albedo = ColorRGB(1.0f, 1.0f, 1.0f);
+        sub.roughness = 0.65f;
+        sub.metallic = 0.05f;
+        sub.texWidth = atlasW;
+        sub.texHeight = atlasH;
+        sub.texRGBA = std::move(atlasRGBA);
+        mesh->submeshes.push_back(std::move(sub));
 
         mesh->CalculateBounds();
         mesh->BuildClusters();

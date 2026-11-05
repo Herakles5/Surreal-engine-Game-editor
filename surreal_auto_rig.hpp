@@ -407,346 +407,91 @@ public:
             j.inverseBindMatrix = Mat4::Translation(Vec3(-wp.x, -wp.y, -wp.z));
         }
 
-        // 2. Build the Adaptive 3D "Rubber Suit" Mesh & Isolated Limb Weights
-        auto suitMesh = std::make_shared<SurrealMesh>();
-        constexpr int N_THETA = 28; // High-density 360-degree radial rings
-        constexpr float TWO_PI = 6.283185307f;
+        // 2. Build the High-Resolution 1,440-Pass 3D Rubber Suit Mesh + Dual-Hemisphere GPU Texture Atlas
+        std::vector<uint8_t> subRGBA(static_cast<size_t>(subW) * imgH * 4);
+        for (int y = 0; y < imgH; ++y) {
+            for (int x = 0; x < subW; ++x) {
+                const unsigned char* src = rgba + (static_cast<size_t>(y) * imgW + (xStart + x)) * 4;
+                uint8_t* dst = subRGBA.data() + (static_cast<size_t>(y) * subW + x) * 4;
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+                dst[3] = isForeground(xStart + x, y) ? 255 : 0;
+            }
+        }
 
-        struct RingSpec {
-            Vec3 center;
-            float rx;
-            float rz;
-            float yNorm;
-            uint16_t j0, j1;
-            float w0, w1;
-            int partType; // 0=Torso/Head, 1=ArmL, 2=ArmR, 3=LegL, 4=LegR
-        };
+        Image3DOptions suitOpt;
+        suitOpt.maxRes = 320;
+        suitOpt.ironingPasses = 1440;
+        suitOpt.heightMeters = H;
+        suitOpt.thicknessRatio = 0.34f;
+        suitOpt.generateBackside = true;
+        suitOpt.anatomicalSmooth = true;
+        suitOpt.mode = 2; // Force character cutout
 
-        auto emitTube = [&](const std::vector<RingSpec>& rings, bool capBottom, bool capTop) {
-            if (rings.size() < 2) return;
-            uint32_t baseVert = static_cast<uint32_t>(suitMesh->vertices.size());
-            int nR = static_cast<int>(rings.size());
+        auto suitMesh = SurrealImage3D::BuildFromRGBA(subRGBA.data(), subW, imgH, suitOpt);
+        if (!suitMesh || suitMesh->vertices.empty()) {
+            RiggedFigureEntity emptyFig;
+            return emptyFig;
+        }
 
-            for (int r = 0; r < nR; ++r) {
-                const auto& rs = rings[r];
-                SilhouetteSlice sl = getSliceAt(rs.yNorm);
+        // Bind High-Res 3D Mesh onto the 20-Joint Master Humanoid Skeleton with smooth anatomical weights
+        inst->bindVertices.resize(suitMesh->vertices.size());
+        for (size_t v = 0; v < suitMesh->vertices.size(); ++v) {
+            const auto& vt = suitMesh->vertices[v];
+            SkinnedVertex3D sv;
+            sv.position = vt.position;
+            sv.normal = vt.normal;
+            sv.u = vt.u;
+            sv.v = vt.v;
+            sv.color = vt.color;
 
-                for (int t = 0; t < N_THETA; ++t) {
-                    float angle = (static_cast<float>(t) / static_cast<float>(N_THETA)) * TWO_PI;
-                    // angle = 0 -> +Z (Front center), PI/2 -> +X (Right), PI -> -Z (Back), 3PI/2 -> -X (Left)
-                    float sinA = std::sin(angle);
-                    float cosA = std::cos(angle);
+            float yNorm = std::max(0.0f, std::min(1.0f, vt.position.y / std::max(0.1f, H)));
+            float absX = std::abs(vt.position.x);
+            bool isLeft = (vt.position.x < 0.0f);
 
-                    float localX = rs.rx * sinA;
-                    float localZ = rs.rz * cosA;
+            uint16_t j0 = 1, j1 = 2;
+            float w0 = 1.0f, w1 = 0.0f;
 
-                    // Subtle 3D facial nose/brow/chin contour on the front of the head
-                    if (rs.partType == 0 && rs.yNorm >= 0.855f && rs.yNorm <= 0.955f && cosA > 0.25f) {
-                        float noseBridge = std::exp(-sinA * sinA * 12.0f) * std::sin((rs.yNorm - 0.855f) / 0.10f * 3.14159f);
-                        localZ += 0.012f * H * noseBridge * cosA;
-                    }
-                    // Subtle 3D shoe toe cap contour at ground level
-                    if ((rs.partType == 3 || rs.partType == 4) && rs.yNorm < 0.055f && cosA > 0.0f) {
-                        float toeFactor = (0.055f - rs.yNorm) / 0.055f;
-                        localZ += 0.032f * H * toeFactor * cosA;
-                    }
-
-                    Vec3 pos(rs.center.x + localX, rs.center.y, rs.center.z + localZ);
-                    Vec3 norm(sinA / std::max(0.001f, rs.rx), 0.0f, cosA / std::max(0.001f, rs.rz));
-                    norm = norm.Normalized();
-
-                    // Compute 2D Rubber-Suit Texture Projection Color
-                    ColorRGB vCol;
-                    float frontFactor = std::max(0.0f, cosA); // 1 at front (+Z), 0 at sides/back
-                    float xFrac = 0.5f + 0.5f * sinA;         // 0 at left edge (-X), 1 at right edge (+X)
-
-                    if (rs.partType == 0) {
-                        // Torso, Neck, Head & Hair
-                        float uSpan = std::max(0.08f, sl.uRight - sl.uLeft);
-                        float uSample = sl.uLeft + (0.14f + 0.72f * xFrac) * uSpan;
-                        ColorRGB frontCol = sampleFittedColor(uSample, rs.yNorm);
-                        if (rs.yNorm > 0.845f) {
-                            // Head: front uses exact face/hair pixels, back wraps 3D hair volume!
-                            float hairBlend = (cosA >= 0.15f) ? 1.0f : std::max(0.0f, (cosA + 0.35f) / 0.50f);
-                            vCol = frontCol * hairBlend + hairColor * (1.0f - hairBlend);
-                        } else {
-                            // Torso/Waist/Hips: front uses outfit detail, back wraps seam-blended outfit color
-                            ColorRGB backCol = sl.avgColor * 0.88f;
-                            float blend = 0.5f + 0.5f * cosA;
-                            vCol = frontCol * blend + backCol * (1.0f - blend);
-                        }
-                    } else if (rs.partType == 1) {
-                        // Left Arm: sample left sleeve/arm edge of silhouette
-                        float uSample = sl.uLeft + 0.08f * (sl.uRight - sl.uLeft) * xFrac;
-                        ColorRGB frontCol = sampleFittedColor(uSample, rs.yNorm);
-                        vCol = frontCol * (0.72f + 0.28f * frontFactor) + sl.leftEdgeColor * (0.28f * (1.0f - frontFactor));
-                    } else if (rs.partType == 2) {
-                        // Right Arm: sample right sleeve/arm edge of silhouette
-                        float uSample = sl.uRight - 0.08f * (sl.uRight - sl.uLeft) * (1.0f - xFrac);
-                        ColorRGB frontCol = sampleFittedColor(uSample, rs.yNorm);
-                        vCol = frontCol * (0.72f + 0.28f * frontFactor) + sl.rightEdgeColor * (0.28f * (1.0f - frontFactor));
-                    } else if (rs.partType == 3) {
-                        // Left Leg & Boot: sample left half of lower-body silhouette
-                        float uSample = sl.uLeft + (0.08f + 0.38f * xFrac) * (sl.uRight - sl.uLeft);
-                        ColorRGB frontCol = sampleFittedColor(uSample, rs.yNorm);
-                        ColorRGB backCol = frontCol * 0.86f;
-                        float blend = 0.5f + 0.5f * cosA;
-                        vCol = frontCol * blend + backCol * (1.0f - blend);
+            if (yNorm >= 0.82f) {
+                // Neck (4) -> Head (5)
+                j0 = 4; j1 = 5;
+                w1 = std::min(1.0f, (yNorm - 0.82f) / 0.06f);
+                w0 = 1.0f - w1;
+            } else if (yNorm >= 0.46f) {
+                // Upper body: check if lateral arm region vs central torso
+                float armThreshold = shHalfX * 0.82f;
+                if (absX > armThreshold && yNorm < 0.78f) {
+                    uint16_t jSh   = isLeft ? 6  : 10;
+                    uint16_t jArm  = isLeft ? 7  : 11;
+                    uint16_t jFore = isLeft ? 8  : 12;
+                    uint16_t jHand = isLeft ? 9  : 13;
+                    float armBlend = std::min(1.0f, (absX - armThreshold) / std::max(0.02f, 0.05f * H));
+                    if (yNorm > 0.66f) {
+                        j0 = 3; j1 = jSh; w1 = armBlend; w0 = 1.0f - w1;
+                    } else if (yNorm > 0.54f) {
+                        j0 = jSh; j1 = jArm; w1 = armBlend; w0 = 1.0f - w1;
                     } else {
-                        // Right Leg & Boot: sample right half of lower-body silhouette
-                        float uSample = sl.uCenter + (0.04f + 0.38f * xFrac) * (sl.uRight - sl.uLeft);
-                        ColorRGB frontCol = sampleFittedColor(uSample, rs.yNorm);
-                        ColorRGB backCol = frontCol * 0.86f;
-                        float blend = 0.5f + 0.5f * cosA;
-                        vCol = frontCol * blend + backCol * (1.0f - blend);
+                        j0 = jArm; j1 = (yNorm < 0.49f) ? jHand : jFore; w1 = armBlend; w0 = 1.0f - w1;
                     }
-
-                    // Subtle cylindrical rim shading for 3D depth pop
-                    float cylindricalShade = 0.88f + 0.12f * std::max(0.0f, cosA * 0.7f + 0.3f);
-                    vCol = vCol * cylindricalShade;
-
-                    Vertex3D v;
-                    v.position = pos;
-                    v.normal = norm;
-                    v.u = xFrac;
-                    v.v = 1.0f - rs.yNorm;
-                    v.color = Vec4(vCol.r, vCol.g, vCol.b, 1.0f);
-                    suitMesh->vertices.push_back(v);
-
-                    SkinnedVertex3D sv;
-                    sv.position = v.position;
-                    sv.normal = v.normal;
-                    sv.u = v.u;
-                    sv.v = v.v;
-                    sv.color = v.color;
-                    sv.joints[0] = rs.j0;
-                    sv.joints[1] = rs.j1;
-                    sv.joints[2] = 0;
-                    sv.joints[3] = 0;
-                    sv.weights[0] = rs.w0;
-                    sv.weights[1] = rs.w1;
-                    sv.weights[2] = 0.0f;
-                    sv.weights[3] = 0.0f;
-                    inst->bindVertices.push_back(sv);
-                }
-            }
-
-            // Stitch quad strip between adjacent rings
-            for (int r = 0; r < nR - 1; ++r) {
-                uint32_t row0 = baseVert + r * N_THETA;
-                uint32_t row1 = baseVert + (r + 1) * N_THETA;
-                for (int t = 0; t < N_THETA; ++t) {
-                    int tNext = (t + 1) % N_THETA;
-                    uint32_t i00 = row0 + t;
-                    uint32_t i01 = row0 + tNext;
-                    uint32_t i10 = row1 + t;
-                    uint32_t i11 = row1 + tNext;
-
-                    suitMesh->indices.push_back(i00);
-                    suitMesh->indices.push_back(i01);
-                    suitMesh->indices.push_back(i11);
-
-                    suitMesh->indices.push_back(i00);
-                    suitMesh->indices.push_back(i11);
-                    suitMesh->indices.push_back(i10);
-                }
-            }
-
-            // Optional bottom & top end-caps for watertight 3D limbs
-            if (capBottom) {
-                const auto& r0 = rings.front();
-                uint32_t cIdx = static_cast<uint32_t>(suitMesh->vertices.size());
-                Vertex3D cv;
-                cv.position = r0.center;
-                cv.normal = Vec3(0, -1.0f, 0);
-                cv.color = suitMesh->vertices[baseVert].color * 0.85f;
-                suitMesh->vertices.push_back(cv);
-                SkinnedVertex3D csv = inst->bindVertices[baseVert];
-                csv.position = cv.position;
-                csv.normal = cv.normal;
-                csv.color = cv.color;
-                inst->bindVertices.push_back(csv);
-                for (int t = 0; t < N_THETA; ++t) {
-                    int tNext = (t + 1) % N_THETA;
-                    suitMesh->indices.push_back(cIdx);
-                    suitMesh->indices.push_back(baseVert + tNext);
-                    suitMesh->indices.push_back(baseVert + t);
-                }
-            }
-            if (capTop) {
-                const auto& rTop = rings.back();
-                uint32_t topRow = baseVert + (nR - 1) * N_THETA;
-                uint32_t cIdx = static_cast<uint32_t>(suitMesh->vertices.size());
-                Vertex3D cv;
-                cv.position = rTop.center;
-                cv.normal = Vec3(0, 1.0f, 0);
-                cv.color = Vec4(hairColor.r, hairColor.g, hairColor.b, 1.0f);
-                suitMesh->vertices.push_back(cv);
-                SkinnedVertex3D csv = inst->bindVertices[topRow];
-                csv.position = cv.position;
-                csv.normal = cv.normal;
-                csv.color = cv.color;
-                inst->bindVertices.push_back(csv);
-                for (int t = 0; t < N_THETA; ++t) {
-                    int tNext = (t + 1) % N_THETA;
-                    suitMesh->indices.push_back(cIdx);
-                    suitMesh->indices.push_back(topRow + t);
-                    suitMesh->indices.push_back(topRow + tNext);
-                }
-            }
-        };
-
-        // --- PART A: Articulated Torso + Neck + Head + Hair Tube (yNorm = 0.44 .. 1.00) ---
-        {
-            std::vector<RingSpec> torsoHeadRings;
-            const int nSlices = 46;
-            for (int i = 0; i <= nSlices; ++i) {
-                float u = static_cast<float>(i) / static_cast<float>(nSlices);
-                float yNorm = 0.44f + u * (1.00f - 0.44f);
-                SilhouetteSlice sl = getSliceAt(yNorm);
-                float rx = 0.08f * H;
-                float rz = 0.06f * H;
-
-                if (yNorm < 0.79f) {
-                    // Pelvis, Waist, Ribcage, Chest: adapt to 2D silhouette width while keeping arms separate
-                    float bodyHalf = std::max(0.068f, std::min(0.125f, sl.widthFrac * 0.36f)) * H;
-                    // Smooth hourglass waist modulation + chest/hip volume
-                    float waistDip = 1.0f - 0.14f * std::exp(-std::pow((yNorm - 0.60f) / 0.07f, 2.0f));
-                    rx = bodyHalf * waistDip;
-                    rz = rx * (yNorm > 0.66f ? 0.72f : 0.66f);
-                } else if (yNorm < 0.855f) {
-                    // Smooth transition from shoulders/collarbone into sculpted 3D Neck
-                    float tNeck = (yNorm - 0.79f) / 0.065f;
-                    float neckEnvelope = 1.0f - 0.58f * std::sin(tNeck * 3.14159f * 0.85f);
-                    rx = (0.072f * neckEnvelope + 0.012f) * H;
-                    rz = rx * 0.92f;
-                } else {
-                    // 3D Head & Hair Cranial Ellipsoid (yNorm = 0.855 .. 1.00)
-                    float tHead = (yNorm - 0.855f) / 0.145f; // 0=chin, 0.5=eyes/temples, 1.0=crown
-                    float profile = std::sin(std::max(0.05f, std::min(0.99f, tHead)) * 3.14159f);
-                    float silHead = std::max(0.058f, std::min(0.088f, sl.widthFrac * 0.32f)) * H;
-                    rx = silHead * (0.55f + 0.45f * std::sqrt(profile));
-                    rz = 0.066f * H * (0.58f + 0.42f * std::sqrt(profile));
-                }
-
-                // Smooth bone weights along Pelvis(1) -> Spine(2) -> Chest(3) -> Neck(4) -> Head(5)
-                uint16_t j0 = 1, j1 = 2;
-                float w0 = 1.0f, w1 = 0.0f;
-                if (yNorm < 0.58f) {
+                } else if (yNorm < 0.58f) {
                     j0 = 1; j1 = 2;
-                    w1 = std::max(0.0f, (yNorm - 0.48f) / 0.10f);
+                    w1 = std::max(0.0f, (yNorm - 0.46f) / 0.12f);
                     w0 = 1.0f - w1;
                 } else if (yNorm < 0.72f) {
                     j0 = 2; j1 = 3;
                     w1 = (yNorm - 0.58f) / 0.14f;
                     w0 = 1.0f - w1;
-                } else if (yNorm < 0.82f) {
+                } else {
                     j0 = 3; j1 = 4;
                     w1 = (yNorm - 0.72f) / 0.10f;
                     w0 = 1.0f - w1;
-                } else {
-                    j0 = 4; j1 = 5;
-                    w1 = std::min(1.0f, (yNorm - 0.82f) / 0.06f);
-                    w0 = 1.0f - w1;
                 }
-
-                torsoHeadRings.push_back({Vec3(0.0f, yNorm * H, 0.0f), rx, rz, yNorm, j0, j1, w0, w1, 0});
-            }
-            emitTube(torsoHeadRings, true, true);
-        }
-
-        // --- PART B: Left & Right Articulated 3D Arms (Shoulder -> Arm -> Forearm -> Hand) ---
-        for (int side = 0; side < 2; ++side) {
-            bool isLeft = (side == 0);
-            Vec3 pSh   = isLeft ? shL      : shR;
-            Vec3 pArm  = isLeft ? armL     : armR;
-            Vec3 pFore = isLeft ? foreArmL : foreArmR;
-            Vec3 pHand = isLeft ? handL    : handR;
-            uint16_t jSh   = isLeft ? 6  : 10;
-            uint16_t jArm  = isLeft ? 7  : 11;
-            uint16_t jFore = isLeft ? 8  : 12;
-            uint16_t jHand = isLeft ? 9  : 13;
-
-            std::vector<RingSpec> armRings;
-            const int nArm = 22;
-            for (int i = 0; i <= nArm; ++i) {
-                float s = static_cast<float>(i) / static_cast<float>(nArm); // 0=hand tip, 1=shoulder
-                float tFromTop = 1.0f - s;
-                Vec3 center;
-                uint16_t j0 = jArm, j1 = jFore;
-                float w0 = 1.0f, w1 = 0.0f;
-
-                if (tFromTop < 0.34f) {
-                    float u = tFromTop / 0.34f;
-                    center = pSh * (1.0f - u) + pArm * u;
-                    j0 = jSh; j1 = jArm;
-                    w0 = std::max(0.0f, 1.0f - u * 1.4f);
-                    w1 = 1.0f - w0;
-                } else if (tFromTop < 0.68f) {
-                    float u = (tFromTop - 0.34f) / 0.34f;
-                    center = pArm * (1.0f - u) + pFore * u;
-                    j0 = jArm; j1 = jFore;
-                    w0 = 1.0f - u;
-                    w1 = u;
-                } else {
-                    float u = (tFromTop - 0.68f) / 0.32f;
-                    center = pFore * (1.0f - u) + pHand * u;
-                    j0 = jFore; j1 = jHand;
-                    w0 = 1.0f - u;
-                    w1 = u;
-                }
-
-                float radius = (0.033f * (1.0f - 0.35f * tFromTop)) * H;
-                // Slight hand palm flattening near tip
-                float rx = (tFromTop > 0.85f) ? radius * 0.78f : radius;
-                float rz = (tFromTop > 0.85f) ? radius * 1.05f : radius;
-                float yNorm = std::max(0.32f, std::min(0.78f, center.y / H));
-
-                armRings.push_back({center, rx, rz, yNorm, j0, j1, w0, w1, isLeft ? 1 : 2});
-            }
-            emitTube(armRings, true, true);
-        }
-
-        // --- PART C: Left & Right Articulated 3D Legs & Sculpted Boots (Y=0.00 .. 0.48*H) ---
-        for (int side = 0; side < 2; ++side) {
-            bool isLeft = (side == 0);
-            Vec3 pHip  = isLeft ? hipL  : hipR;
-            Vec3 pKnee = isLeft ? kneeL : kneeR;
-            Vec3 pFoot = isLeft ? footL : footR;
-            uint16_t jUpLeg = isLeft ? 14 : 17;
-            uint16_t jLeg   = isLeft ? 15 : 18;
-            uint16_t jFoot  = isLeft ? 16 : 19;
-
-            std::vector<RingSpec> legRings;
-            const int nLeg = 28;
-            for (int i = 0; i <= nLeg; ++i) {
-                float u = static_cast<float>(i) / static_cast<float>(nLeg); // 0=ground sole (Y=0), 1=hip (0.48*H)
-                float yNorm = u * 0.48f;
-                float yWorld = yNorm * H;
-                SilhouetteSlice sl = getSliceAt(yNorm);
-
-                Vec3 center;
-                if (yNorm < 0.042f) {
-                    float t = yNorm / 0.042f;
-                    center = Vec3(pFoot.x, yWorld, pFoot.z * (1.5f - 0.5f * t));
-                } else if (yNorm < 0.25f) {
-                    float t = (yNorm - 0.042f) / (0.25f - 0.042f);
-                    center = pFoot * (1.0f - t) + pKnee * t;
-                } else {
-                    float t = (yNorm - 0.25f) / (0.48f - 0.25f);
-                    center = pKnee * (1.0f - t) + pHip * t;
-                }
-
-                // Adapt leg & thigh/calf/boot thickness to 2D silhouette while guaranteeing clean separation between legs
-                float maxAllowedRx = std::max(0.036f * H, std::abs(center.x) * 0.86f);
-                float anatCurve = 0.040f + 0.022f * u; // calf -> thigh taper
-                if (yNorm < 0.08f) anatCurve = 0.044f; // boot/shoe volume
-                float silRadius = std::max(0.038f, std::min(0.064f, sl.widthFrac * 0.22f));
-                float rx = std::min(maxAllowedRx, (0.5f * anatCurve + 0.5f * silRadius) * H);
-                float rz = rx * (yNorm < 0.06f ? 1.35f : 1.04f);
-
-                uint16_t j0 = jUpLeg, j1 = jLeg;
-                float w0 = 1.0f, w1 = 0.0f;
+            } else {
+                // Lower body: Left Leg (14,15,16) vs Right Leg (17,18,19)
+                uint16_t jUpLeg = isLeft ? 14 : 17;
+                uint16_t jLeg   = isLeft ? 15 : 18;
+                uint16_t jFoot  = isLeft ? 16 : 19;
                 if (yNorm < 0.08f) {
                     j0 = jFoot; j1 = jLeg;
                     w0 = 1.0f - (yNorm / 0.08f) * 0.5f;
@@ -756,19 +501,23 @@ public:
                     w1 = std::max(0.0f, (yNorm - 0.18f) / 0.14f);
                     w0 = 1.0f - w1;
                 } else {
-                    j0 = jUpLeg; j1 = 1; // Blend into Pelvis at top of hip
-                    w1 = std::max(0.0f, (yNorm - 0.42f) / 0.08f);
+                    j0 = jUpLeg; j1 = 1;
+                    w1 = std::max(0.0f, (yNorm - 0.38f) / 0.08f);
                     w0 = 1.0f - w1;
                 }
-
-                legRings.push_back({center, rx, rz, yNorm, j0, j1, w0, w1, isLeft ? 3 : 4});
             }
-            emitTube(legRings, true, true);
+
+            sv.joints[0] = j0; sv.weights[0] = w0;
+            sv.joints[1] = j1; sv.weights[1] = w1;
+            sv.joints[2] = 0;  sv.weights[2] = 0.0f;
+            sv.joints[3] = 0;  sv.weights[3] = 0.0f;
+            inst->bindVertices[v] = sv;
         }
 
         suitMesh->CalculateBounds();
         inst->activeDeformedMesh->indices = suitMesh->indices;
         inst->activeDeformedMesh->vertices = suitMesh->vertices;
+        inst->activeDeformedMesh->submeshes = suitMesh->submeshes;
         inst->activeDeformedMesh->CalculateBounds();
 
         // Synthesize Procedural K-Pop Dance & Breathing Animation Clips
