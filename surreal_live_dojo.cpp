@@ -510,7 +510,7 @@ int main(int argc, char* argv[]) {
     if (!std::filesystem::exists(aionAvatarPath)) {
         aionAvatarPath = modelPath;
     }
-    gameMaster.InitAionPlayer(engine, editor, aionAvatarPath, Surreal::Vec3(0, 0, 0));
+    gameMaster.InitAionPlayer(engine, editor, aionAvatarPath, Surreal::Vec3(0.0f, 0.0f, 6.0f));
 
     // Register entities in Editor Outliner
     Surreal::EditableEntity floorEd;
@@ -688,11 +688,11 @@ int main(int argc, char* argv[]) {
     // 5. Initialize Camera Controllers
     Surreal::InteractiveCameraController playCamera;
     playCamera.mode = Surreal::CameraMode::ORBIT_THIRD_PERSON;
-    playCamera.distance = 4.2f;
-    playCamera.targetDistance = 4.2f;
-    playCamera.pitch = 0.14f;
+    playCamera.distance = 2.8f;
+    playCamera.targetDistance = 2.8f;
+    playCamera.pitch = 0.18f;
     playCamera.yaw = 0.0f;
-    playCamera.SetTarget(Surreal::Vec3(0.0f, 1.25f, 5.2f));
+    playCamera.SetTarget(Surreal::Vec3(0.0f, 1.25f, 6.0f));
 
     if (startInEditor && editor.mode != Surreal::EditorMode::EDIT_MODE) {
         editor.ToggleMode(playCamera.GetPosition(), playCamera.pitch, playCamera.yaw);
@@ -767,7 +767,7 @@ int main(int argc, char* argv[]) {
     applySkyProfile(currentSkyProfile);
 
     // 6. Physics State (Framed in front of the 5 MEOVV figures at z = 4.2f)
-    Surreal::Vec3 charPos(0.0f, 0.0f, 5.2f);
+    Surreal::Vec3 charPos(0.0f, 0.0f, 6.0f);
     Surreal::Vec3 charVel(0, 0, 0);
     bool isGrounded = true;
     float currentGravity = -14.8f;
