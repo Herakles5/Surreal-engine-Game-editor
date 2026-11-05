@@ -690,166 +690,360 @@ public:
         inst->activeDeformedMesh->vertices = sourceMesh->vertices;
         inst->activeDeformedMesh->submeshes = sourceMesh->submeshes;
         inst->activeDeformedMesh->CalculateBounds();
-        inst->clips = GenerateProceduralClips(figureSeed);
-        inst->PlayClip(0);
+        inst->clips = GenerateProceduralClips(figureSeed, H);
+        inst->PlayClip(0, true);
         inst->Update(0.016f);
         return inst;
     }
 
     /**
-     * Synthesizes K-Pop Dance & Natural Breathing Clips.
+     * Synthesizes 4 Full-Body 20-Joint K-Pop Choreography & Stage Clips.
+     * Joint Indices:
+     *   0:Root, 1:Pelvis, 2:Spine, 3:Chest, 4:Neck, 5:Head,
+     *   6:Shoulder_L, 7:Arm_L, 8:Forearm_L, 9:Hand_L,
+     *  10:Shoulder_R, 11:Arm_R, 12:Forearm_R, 13:Hand_R,
+     *  14:UpLeg_L, 15:Leg_L, 16:Foot_L,
+     *  17:UpLeg_R, 18:Leg_R, 19:Foot_R
      */
-    static std::vector<AnimationClip> GenerateProceduralClips(size_t seed) {
+    static std::vector<AnimationClip> GenerateProceduralClips(size_t seed, float H = 2.20f) {
         std::vector<AnimationClip> clips;
+        constexpr float TWO_PI = 6.2831853f;
+        const float basePelvisY = 0.48f * H;
 
-        // Clip 0: KPop_IdleBreathe (Organic posture sway, arm poise & respiration)
+        // =========================================================================
+        // Clip 0 (DEFAULT): KPop_MeovvChoreo — Full 20-Joint K-Pop Stage Choreography
+        // Rhythmic knee bounce, hip wave, torso isolation, shoulder pops, arm grooves & head nod
+        // =========================================================================
+        {
+            AnimationClip clip;
+            clip.name = "KPop_MeovvChoreo";
+            clip.duration = 2.4f;
+            float phase = static_cast<float>(seed) * 0.35f;
+            const int nKeys = 48;
+
+            auto addRotChannel = [&](int jIdx, auto fn) {
+                AnimationChannel ch;
+                ch.jointIndex = jIdx;
+                ch.target = ChannelTarget::ROTATION;
+                for (int k = 0; k <= nKeys; ++k) {
+                    float t = (float)k / nKeys * clip.duration;
+                    float w = (t / clip.duration) * TWO_PI;
+                    ch.keyTimes.push_back(t);
+                    ch.quatValues.push_back(fn(w));
+                }
+                clip.channels.push_back(ch);
+            };
+
+            // Pelvis (1) Translation: Double-time K-Pop knee bounce + lateral hip glide
+            {
+                AnimationChannel pelTrans;
+                pelTrans.jointIndex = 1;
+                pelTrans.target = ChannelTarget::TRANSLATION;
+                for (int k = 0; k <= nKeys; ++k) {
+                    float t = (float)k / nKeys * clip.duration;
+                    float w = (t / clip.duration) * TWO_PI;
+                    float dx = std::sin(w + phase) * (0.028f * H);
+                    float dy = -std::abs(std::sin(w + phase)) * (0.022f * H);
+                    float dz = std::sin(2.0f * w + phase) * (0.012f * H);
+                    pelTrans.keyTimes.push_back(t);
+                    pelTrans.vecValues.push_back(Vec3(dx, basePelvisY + dy, dz));
+                }
+                clip.channels.push_back(pelTrans);
+            }
+
+            // Pelvis (1) Rotation: Hip sway roll & twist
+            addRotChannel(1, [&](float w) {
+                float roll  = std::sin(w + phase) * 0.13f;
+                float yaw   = std::cos(w + phase) * 0.11f;
+                float pitch = std::sin(2.0f * w + phase) * 0.045f;
+                return Quat::FromAxisAngle(Vec3(0, 1.0f, 0), yaw) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll) *
+                       Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch);
+            });
+
+            // Spine (2): Counter-sway & body-wave isolation
+            addRotChannel(2, [&](float w) {
+                float roll  = -std::sin(w + phase) * 0.09f;
+                float pitch = std::cos(2.0f * w + phase) * 0.065f;
+                float yaw   = -std::cos(w + phase) * 0.06f;
+                return Quat::FromAxisAngle(Vec3(0, 1.0f, 0), yaw) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll) *
+                       Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch);
+            });
+
+            // Chest (3): Rhythmic K-Pop chest pop & twist
+            addRotChannel(3, [&](float w) {
+                float pitch = std::sin(2.0f * w + phase - 0.4f) * 0.075f;
+                float roll  = std::sin(w + phase + 0.5f) * 0.06f;
+                float yaw   = std::sin(w + phase) * 0.08f;
+                return Quat::FromAxisAngle(Vec3(0, 1.0f, 0), yaw) *
+                       Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll);
+            });
+
+            // Neck (4) & Head (5): Charismatic beat nod & side glance
+            addRotChannel(4, [&](float w) {
+                float roll = -std::sin(w + phase) * 0.04f;
+                return Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll);
+            });
+            addRotChannel(5, [&](float w) {
+                float pitch = std::sin(2.0f * w + phase) * 0.07f;
+                float yaw   = std::sin(w + phase * 0.5f) * 0.11f;
+                float roll  = std::cos(w + phase) * 0.065f;
+                return Quat::FromAxisAngle(Vec3(0, 1.0f, 0), yaw) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll) *
+                       Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch);
+            });
+
+            // Shoulders (6, 10): Alternating shoulder pops
+            addRotChannel(6, [&](float w) {
+                float roll = std::sin(2.0f * w + phase) * 0.11f;
+                return Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll);
+            });
+            addRotChannel(10, [&](float w) {
+                float roll = -std::sin(2.0f * w + phase + 1.57f) * 0.11f;
+                return Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll);
+            });
+
+            // Arms (7, 11) & Forearms (8, 12) & Hands (9, 13): K-Pop Arm Choreography
+            addRotChannel(7, [&](float w) {
+                float pitch = std::sin(w + phase) * 0.24f;
+                float roll  = 0.06f + std::cos(2.0f * w + phase) * 0.14f;
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll);
+            });
+            addRotChannel(8, [&](float w) {
+                float pitch = -0.12f + std::sin(2.0f * w + phase - 0.5f) * 0.20f;
+                float yaw   = std::cos(w + phase) * 0.12f;
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch) *
+                       Quat::FromAxisAngle(Vec3(0, 1.0f, 0), yaw);
+            });
+            addRotChannel(9, [&](float w) {
+                float roll = std::sin(2.0f * w + phase) * 0.16f;
+                return Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll);
+            });
+
+            addRotChannel(11, [&](float w) {
+                float pitch = -std::sin(w + phase) * 0.24f;
+                float roll  = -0.06f - std::cos(2.0f * w + phase) * 0.14f;
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll);
+            });
+            addRotChannel(12, [&](float w) {
+                float pitch = -0.12f + std::cos(2.0f * w + phase - 0.5f) * 0.20f;
+                float yaw   = -std::sin(w + phase) * 0.12f;
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch) *
+                       Quat::FromAxisAngle(Vec3(0, 1.0f, 0), yaw);
+            });
+            addRotChannel(13, [&](float w) {
+                float roll = -std::sin(2.0f * w + phase) * 0.16f;
+                return Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll);
+            });
+
+            // Left Leg (14:UpLeg_L, 15:Leg_L, 16:Foot_L) & Right Leg (17:UpLeg_R, 18:Leg_R, 19:Foot_R)
+            addRotChannel(14, [&](float w) {
+                float stepL = std::max(0.0f, std::sin(w + phase));
+                float pitch = -stepL * 0.20f - std::abs(std::sin(w + phase)) * 0.08f;
+                float roll  = -std::sin(w + phase) * 0.07f;
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll);
+            });
+            addRotChannel(15, [&](float w) {
+                float stepL = std::max(0.0f, std::sin(w + phase));
+                float kneeBend = stepL * 0.32f + std::abs(std::sin(w + phase)) * 0.12f;
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), kneeBend);
+            });
+            addRotChannel(16, [&](float w) {
+                float stepL = std::max(0.0f, std::sin(w + phase));
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), -stepL * 0.14f);
+            });
+
+            addRotChannel(17, [&](float w) {
+                float stepR = std::max(0.0f, -std::sin(w + phase));
+                float pitch = -stepR * 0.20f - std::abs(std::sin(w + phase)) * 0.08f;
+                float roll  = -std::sin(w + phase) * 0.07f;
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll);
+            });
+            addRotChannel(18, [&](float w) {
+                float stepR = std::max(0.0f, -std::sin(w + phase));
+                float kneeBend = stepR * 0.32f + std::abs(std::sin(w + phase)) * 0.12f;
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), kneeBend);
+            });
+            addRotChannel(19, [&](float w) {
+                float stepR = std::max(0.0f, -std::sin(w + phase));
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), -stepR * 0.14f);
+            });
+
+            clips.push_back(clip);
+        }
+
+        // =========================================================================
+        // Clip 1: KPop_HipHopGroove — High-Energy Bass Bounce & Arm Hits
+        // =========================================================================
+        {
+            AnimationClip clip;
+            clip.name = "KPop_HipHopGroove";
+            clip.duration = 1.8f;
+            float phase = static_cast<float>(seed) * 0.45f;
+            const int nKeys = 36;
+
+            AnimationChannel pelTrans;
+            pelTrans.jointIndex = 1;
+            pelTrans.target = ChannelTarget::TRANSLATION;
+            for (int k = 0; k <= nKeys; ++k) {
+                float t = (float)k / nKeys * clip.duration;
+                float w = (t / clip.duration) * TWO_PI;
+                float dx = std::sin(w + phase) * (0.036f * H);
+                float dy = -std::abs(std::sin(2.0f * w + phase)) * (0.028f * H);
+                pelTrans.keyTimes.push_back(t);
+                pelTrans.vecValues.push_back(Vec3(dx, basePelvisY + dy, 0.0f));
+            }
+            clip.channels.push_back(pelTrans);
+
+            auto addRot = [&](int jIdx, auto fn) {
+                AnimationChannel ch;
+                ch.jointIndex = jIdx;
+                ch.target = ChannelTarget::ROTATION;
+                for (int k = 0; k <= nKeys; ++k) {
+                    float t = (float)k / nKeys * clip.duration;
+                    float w = (t / clip.duration) * TWO_PI;
+                    ch.keyTimes.push_back(t);
+                    ch.quatValues.push_back(fn(w));
+                }
+                clip.channels.push_back(ch);
+            };
+
+            addRot(1, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(0, 0, 1.0f), std::sin(w + phase) * 0.15f) *
+                       Quat::FromAxisAngle(Vec3(0, 1.0f, 0), std::sin(2.0f * w + phase) * 0.12f);
+            });
+            addRot(2, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::abs(std::sin(2.0f * w + phase)) * 0.10f) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), -std::sin(w + phase) * 0.11f);
+            });
+            addRot(3, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(0, 1.0f, 0), std::cos(w + phase) * 0.12f);
+            });
+            addRot(5, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::sin(2.0f * w + phase) * 0.10f) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), std::cos(w + phase) * 0.08f);
+            });
+            addRot(7, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::sin(2.0f * w + phase) * 0.28f) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), 0.10f + std::cos(w + phase) * 0.16f);
+            });
+            addRot(11, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), -std::sin(2.0f * w + phase) * 0.28f) *
+                       Quat::FromAxisAngle(Vec3(0, 0, 1.0f), -0.10f - std::cos(w + phase) * 0.16f);
+            });
+            addRot(14, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), -std::abs(std::sin(2.0f * w + phase)) * 0.18f);
+            });
+            addRot(15, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::abs(std::sin(2.0f * w + phase)) * 0.30f);
+            });
+            addRot(17, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), -std::abs(std::cos(2.0f * w + phase)) * 0.18f);
+            });
+            addRot(18, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::abs(std::cos(2.0f * w + phase)) * 0.30f);
+            });
+
+            clips.push_back(clip);
+        }
+
+        // =========================================================================
+        // Clip 2: KPop_CatwalkWave — Runway Strut & Fluid Body Wave
+        // =========================================================================
+        {
+            AnimationClip clip;
+            clip.name = "KPop_CatwalkWave";
+            clip.duration = 2.0f;
+            float phase = static_cast<float>(seed) * 0.5f;
+            const int nKeys = 36;
+
+            auto addRot = [&](int jIdx, auto fn) {
+                AnimationChannel ch;
+                ch.jointIndex = jIdx;
+                ch.target = ChannelTarget::ROTATION;
+                for (int k = 0; k <= nKeys; ++k) {
+                    float t = (float)k / nKeys * clip.duration;
+                    float w = (t / clip.duration) * TWO_PI;
+                    ch.keyTimes.push_back(t);
+                    ch.quatValues.push_back(fn(w));
+                }
+                clip.channels.push_back(ch);
+            };
+
+            addRot(1, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(0, 0, 1.0f), std::sin(w + phase) * 0.14f) *
+                       Quat::FromAxisAngle(Vec3(0, 1.0f, 0), std::cos(w + phase) * 0.12f);
+            });
+            addRot(2, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(0, 0, 1.0f), -std::sin(w + phase) * 0.10f);
+            });
+            addRot(5, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(0, 1.0f, 0), std::sin(w + phase) * 0.14f);
+            });
+            addRot(7, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), -std::sin(w + phase) * 0.22f);
+            });
+            addRot(11, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::sin(w + phase) * 0.22f);
+            });
+            addRot(14, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::sin(w + phase) * 0.26f);
+            });
+            addRot(15, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::max(0.0f, -std::sin(w + phase)) * 0.34f);
+            });
+            addRot(17, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), -std::sin(w + phase) * 0.26f);
+            });
+            addRot(18, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::max(0.0f, std::sin(w + phase)) * 0.34f);
+            });
+
+            clips.push_back(clip);
+        }
+
+        // =========================================================================
+        // Clip 3: KPop_IdleBreathe — Poised Stage Stance & Respiration
+        // =========================================================================
         {
             AnimationClip clip;
             clip.name = "KPop_IdleBreathe";
-            clip.duration = 3.6f;
-
+            clip.duration = 3.2f;
             float phase = static_cast<float>(seed) * 0.7f;
             const int nKeys = 24;
 
-            // Spine breathing oscillation
-            AnimationChannel spineChan;
-            spineChan.jointIndex = 2; // Spine
-            spineChan.target = ChannelTarget::ROTATION;
-            for (int k = 0; k <= nKeys; ++k) {
-                float t = (float)k / nKeys * clip.duration;
-                spineChan.keyTimes.push_back(t);
-                float pitch = std::sin(t * 3.14159f * 2.0f / clip.duration + phase) * 0.04f;
-                spineChan.quatValues.push_back(Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch));
-            }
-            clip.channels.push_back(spineChan);
+            auto addRot = [&](int jIdx, auto fn) {
+                AnimationChannel ch;
+                ch.jointIndex = jIdx;
+                ch.target = ChannelTarget::ROTATION;
+                for (int k = 0; k <= nKeys; ++k) {
+                    float t = (float)k / nKeys * clip.duration;
+                    float w = (t / clip.duration) * TWO_PI;
+                    ch.keyTimes.push_back(t);
+                    ch.quatValues.push_back(fn(w));
+                }
+                clip.channels.push_back(ch);
+            };
 
-            // Chest expansion
-            AnimationChannel chestChan;
-            chestChan.jointIndex = 3; // Chest
-            chestChan.target = ChannelTarget::ROTATION;
-            for (int k = 0; k <= nKeys; ++k) {
-                float t = (float)k / nKeys * clip.duration;
-                chestChan.keyTimes.push_back(t);
-                float pitch = std::sin(t * 3.14159f * 2.0f / clip.duration + phase + 0.3f) * 0.035f;
-                chestChan.quatValues.push_back(Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch));
-            }
-            clip.channels.push_back(chestChan);
-
-            // Head micro-tilt
-            AnimationChannel headChan;
-            headChan.jointIndex = 5; // Head
-            headChan.target = ChannelTarget::ROTATION;
-            for (int k = 0; k <= nKeys; ++k) {
-                float t = (float)k / nKeys * clip.duration;
-                headChan.keyTimes.push_back(t);
-                float roll = std::cos(t * 3.14159f * 2.0f / clip.duration + phase) * 0.035f;
-                float yaw = std::sin(t * 3.14159f * 2.0f / clip.duration + phase) * 0.04f;
-                Quat q = Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll) * Quat::FromAxisAngle(Vec3(0, 1.0f, 0), yaw);
-                headChan.quatValues.push_back(q);
-            }
-            clip.channels.push_back(headChan);
-
-            clips.push_back(clip);
-        }
-
-        // Clip 1: KPop_DanceGroove (Rhythmic hip wave & arm motion)
-        {
-            AnimationClip clip;
-            clip.name = "KPop_DanceGroove";
-            clip.duration = 2.0f;
-
-            float phase = static_cast<float>(seed) * 0.4f;
-            const int nKeys = 24;
-
-            // Hip sway & roll
-            AnimationChannel hipChan;
-            hipChan.jointIndex = 1; // Pelvis
-            hipChan.target = ChannelTarget::ROTATION;
-            for (int k = 0; k <= nKeys; ++k) {
-                float t = (float)k / nKeys * clip.duration;
-                hipChan.keyTimes.push_back(t);
-                float roll = std::sin(t * 3.14159f * 2.0f / clip.duration + phase) * 0.12f;
-                float yaw  = std::cos(t * 3.14159f * 2.0f / clip.duration + phase) * 0.06f;
-                hipChan.quatValues.push_back(Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll) *
-                                             Quat::FromAxisAngle(Vec3(0, 1.0f, 0), yaw));
-            }
-            clip.channels.push_back(hipChan);
-
-            // Spine counter-sway
-            AnimationChannel spineChan;
-            spineChan.jointIndex = 2; // Spine
-            spineChan.target = ChannelTarget::ROTATION;
-            for (int k = 0; k <= nKeys; ++k) {
-                float t = (float)k / nKeys * clip.duration;
-                spineChan.keyTimes.push_back(t);
-                float roll = -std::sin(t * 3.14159f * 2.0f / clip.duration + phase) * 0.08f;
-                spineChan.quatValues.push_back(Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll));
-            }
-            clip.channels.push_back(spineChan);
-
-            // Left arm dance gesture
-            AnimationChannel armLChan;
-            armLChan.jointIndex = 7; // Arm_L
-            armLChan.target = ChannelTarget::ROTATION;
-            for (int k = 0; k <= nKeys; ++k) {
-                float t = (float)k / nKeys * clip.duration;
-                armLChan.keyTimes.push_back(t);
-                float pitch = std::sin(t * 3.14159f * 2.0f / clip.duration + phase) * 0.18f;
-                float roll  = 0.10f + std::cos(t * 3.14159f * 2.0f / clip.duration + phase) * 0.12f;
-                armLChan.quatValues.push_back(Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch) *
-                                              Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll));
-            }
-            clip.channels.push_back(armLChan);
-
-            // Right arm dance gesture
-            AnimationChannel armRChan;
-            armRChan.jointIndex = 11; // Arm_R
-            armRChan.target = ChannelTarget::ROTATION;
-            for (int k = 0; k <= nKeys; ++k) {
-                float t = (float)k / nKeys * clip.duration;
-                armRChan.keyTimes.push_back(t);
-                float pitch = -std::sin(t * 3.14159f * 2.0f / clip.duration + phase) * 0.18f;
-                float roll  = -0.10f - std::cos(t * 3.14159f * 2.0f / clip.duration + phase) * 0.12f;
-                armRChan.quatValues.push_back(Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch) *
-                                              Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll));
-            }
-            clip.channels.push_back(armRChan);
-
-            clips.push_back(clip);
-        }
-
-        // Clip 2: KPop_StagePose (Static high-fashion group pose with breathing)
-        {
-            AnimationClip clip;
-            clip.name = "KPop_StagePose";
-            clip.duration = 4.0f;
-
-            float phase = static_cast<float>(seed) * 0.5f;
-            const int nKeys = 16;
-
-            AnimationChannel hipChan;
-            hipChan.jointIndex = 1;
-            hipChan.target = ChannelTarget::ROTATION;
-            for (int k = 0; k <= nKeys; ++k) {
-                float t = (float)k / nKeys * clip.duration;
-                hipChan.keyTimes.push_back(t);
-                float roll = 0.08f + std::sin(t * 3.14159f * 2.0f / clip.duration) * 0.02f;
-                hipChan.quatValues.push_back(Quat::FromAxisAngle(Vec3(0, 0, 1.0f), roll));
-            }
-            clip.channels.push_back(hipChan);
-
-            AnimationChannel headChan;
-            headChan.jointIndex = 5;
-            headChan.target = ChannelTarget::ROTATION;
-            for (int k = 0; k <= nKeys; ++k) {
-                float t = (float)k / nKeys * clip.duration;
-                headChan.keyTimes.push_back(t);
-                float yaw = 0.12f * ((seed % 2 == 0) ? 1.0f : -1.0f);
-                float pitch = -0.05f + std::sin(t * 3.14159f * 2.0f / clip.duration + phase) * 0.015f;
-                headChan.quatValues.push_back(Quat::FromAxisAngle(Vec3(0, 1.0f, 0), yaw) *
-                                              Quat::FromAxisAngle(Vec3(1.0f, 0, 0), pitch));
-            }
-            clip.channels.push_back(headChan);
+            addRot(1, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(0, 0, 1.0f), std::sin(w + phase) * 0.05f);
+            });
+            addRot(2, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::sin(w + phase) * 0.04f);
+            });
+            addRot(3, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(1.0f, 0, 0), std::sin(w + phase + 0.3f) * 0.035f);
+            });
+            addRot(5, [&](float w) {
+                return Quat::FromAxisAngle(Vec3(0, 0, 1.0f), std::cos(w + phase) * 0.04f) *
+                       Quat::FromAxisAngle(Vec3(0, 1.0f, 0), std::sin(w + phase) * 0.06f);
+            });
 
             clips.push_back(clip);
         }
