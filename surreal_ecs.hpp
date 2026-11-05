@@ -93,6 +93,7 @@ struct AionMindComponent {
 class SurrealWorld {
 public:
     std::vector<EntityID> entities;
+    std::unordered_map<EntityID, std::string> entityNames;
     std::unordered_map<EntityID, TransformComponent> transforms;
     std::unordered_map<EntityID, RigidBodyComponent> rigidbodies;
     std::unordered_map<EntityID, ColliderComponent> colliders;
@@ -112,11 +113,13 @@ public:
     EntityID CreateEntity(const std::string& name = "Entity") {
         EntityID id = nextEntityId++;
         entities.push_back(id);
+        entityNames[id] = name;
         transforms[id] = TransformComponent();
         return id;
     }
 
     void DestroyEntity(EntityID id) {
+        entityNames.erase(id);
         transforms.erase(id);
         rigidbodies.erase(id);
         colliders.erase(id);

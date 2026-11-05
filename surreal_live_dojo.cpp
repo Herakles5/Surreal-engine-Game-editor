@@ -657,11 +657,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Optional Auto-Rig Group Segmentation (via --rig-group <image.png|jpg>)
-    if (!rigGroupPath.empty()) {
-        editor.AutoSegmentGroupIntoFigures(rigGroupPath, engine.world, obstacles);
-        showSkeletonDebug = true;
-        editor.mode = Surreal::EditorMode::EDIT_MODE;
+    // Always auto-spawn the 5 MEOVV Adaptive 3D Rubber-Suit figures (Ella, Gawon, Sooin, Anna, Narin)
+    {
+        std::string groupImg = rigGroupPath.empty() ? "/root/Downloads/meovv_nobg.png" : rigGroupPath;
+        editor.AutoSegmentGroupIntoFigures(groupImg, engine.world, obstacles);
+        if (!rigGroupPath.empty()) {
+            showSkeletonDebug = true;
+            editor.mode = Surreal::EditorMode::EDIT_MODE;
+        }
     }
 
     // Apply requested avatar if specified via CLI
@@ -685,11 +688,11 @@ int main(int argc, char* argv[]) {
     // 5. Initialize Camera Controllers
     Surreal::InteractiveCameraController playCamera;
     playCamera.mode = Surreal::CameraMode::ORBIT_THIRD_PERSON;
-    playCamera.distance = 2.8f;
-    playCamera.targetDistance = 2.8f;
-    playCamera.pitch = 0.28f;
+    playCamera.distance = 4.2f;
+    playCamera.targetDistance = 4.2f;
+    playCamera.pitch = 0.14f;
     playCamera.yaw = 0.0f;
-    playCamera.SetTarget(Surreal::Vec3(0, 1.25f, 0));
+    playCamera.SetTarget(Surreal::Vec3(0.0f, 1.25f, 5.2f));
 
     if (startInEditor && editor.mode != Surreal::EditorMode::EDIT_MODE) {
         editor.ToggleMode(playCamera.GetPosition(), playCamera.pitch, playCamera.yaw);
@@ -711,12 +714,12 @@ int main(int argc, char* argv[]) {
     const AtmosphericProfile skyProfiles[4] = {
         // 0: CYBERPUNK NIGHT - Authentic midnight city, dark asphalt, neon contrast & starry sky
         {"Cyberpunk Nacht (Night)",
-         Surreal::Vec3(-0.35f, 0.85f, -0.40f).Normalized(),
-         Surreal::ColorRGB(0.25f, 0.38f, 0.65f), 0.15f,
-         Surreal::ColorRGB(0.032f, 0.038f, 0.052f),
-         Surreal::ColorRGB(0.002f, 0.003f, 0.008f),
-         Surreal::ColorRGB(0.008f, 0.014f, 0.028f),
-         Surreal::ColorRGB(0.005f, 0.007f, 0.012f),
+         Surreal::Vec3(-0.25f, 0.75f, 0.60f).Normalized(),
+         Surreal::ColorRGB(0.82f, 0.88f, 1.00f), 0.85f,
+         Surreal::ColorRGB(0.32f, 0.34f, 0.42f),
+         Surreal::ColorRGB(0.004f, 0.006f, 0.016f),
+         Surreal::ColorRGB(0.015f, 0.026f, 0.052f),
+         Surreal::ColorRGB(0.008f, 0.010f, 0.018f),
          true},
 
         // 1: DAY - Clear Seoul daylight with deep azure zenith
@@ -763,8 +766,8 @@ int main(int argc, char* argv[]) {
     };
     applySkyProfile(currentSkyProfile);
 
-    // 6. Physics State
-    Surreal::Vec3 charPos(0, 0, 0);
+    // 6. Physics State (Framed in front of the 5 MEOVV figures at z = 4.2f)
+    Surreal::Vec3 charPos(0.0f, 0.0f, 5.2f);
     Surreal::Vec3 charVel(0, 0, 0);
     bool isGrounded = true;
     float currentGravity = -14.8f;
@@ -1513,7 +1516,7 @@ int main(int argc, char* argv[]) {
             if (moveDir.LengthSq() > 0.001f) {
                 moveDir = moveDir.Normalized();
                 float targetYaw = atan2f(moveDir.x, moveDir.z);
-                charTransform.rotation = Surreal::Quat::FromAxisAngle(Surreal::Vec3(0, 1.0f, 0), targetYaw);
+                engine.world.transforms[avatarEntity].rotation = Surreal::Quat::FromAxisAngle(Surreal::Vec3(0, 1.0f, 0), targetYaw);
 
                 Surreal::Vec3 nextPos = charPos + (moveDir * (currentMoveSpeed * dt));
                 constexpr float CHAR_RADIUS = 0.22f;
@@ -1568,7 +1571,7 @@ int main(int argc, char* argv[]) {
                 isGrounded = false;
             }
 
-            charTransform.position = charPos;
+            engine.world.transforms[avatarEntity].position = charPos;
 
             // Update Spring-Arm Play Camera (Tracks either Prime Avatar or Aion depending on control swap)
             Surreal::Vec3 activeCamTarget = gameMaster.isPlayerControllingAion

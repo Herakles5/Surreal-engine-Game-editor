@@ -544,15 +544,23 @@ public:
         bool loaded = false;
         bool isPhoto = IsImageFile(file);
         if (isPhoto) {
-            Image3DInfo info;
-            placementMesh = SurrealImage3D::BuildFromFile(file.fullPath, userOpt, &info);
-            loaded = (placementMesh != nullptr);
+            auto rubberFig = SurrealAutoRigger::BuildSingleRubberSuitCharacter(
+                file.fullPath, GetCleanName(file.filename), userOpt, entities.size());
+            if (rubberFig.mesh && !rubberFig.mesh->vertices.empty()) {
+                placementMesh = rubberFig.mesh;
+                placementSkeletal = rubberFig.skeletal;
+                loaded = true;
+            } else {
+                Image3DInfo info;
+                placementMesh = SurrealImage3D::BuildFromFile(file.fullPath, userOpt, &info);
+                loaded = (placementMesh != nullptr);
+                if (!loaded) {
+                    SetStatus("[-] Photo->3D: " + info.error, 5.0f);
+                    return false;
+                }
+            }
             placementMetallic = 0.05f;
             placementRoughness = 0.85f;
-            if (!loaded) {
-                SetStatus("[-] Photo->3D: " + info.error, 5.0f);
-                return false;
-            }
         } else if (file.extension == ".obj") {
             placementColor = colorPalette[currentPaletteIdx % colorPalette.size()];
             loaded = SurrealModelLoader::LoadCustomFile(file.fullPath, placementMesh, placementColor);
@@ -1037,20 +1045,14 @@ public:
     {
         SetStatus("[*] Aion Auto-Rigger: Segmenting group photo & synthesizing skeletons...", 5.0f);
 
-        // Delete any old flat single group entity if present
-        std::vector<EntityID> toRemove;
-        for (const auto& e : entities) {
-            if (e.name.find("meovv") != std::string::npos && e.name.find("MEOVV_") == std::string::npos) {
-                toRemove.push_back(e.id);
-            }
-        }
-        for (auto id : toRemove) {
-            for (size_t i = 0; i < entities.size(); ++i) {
-                if (entities[i].id == id) {
-                    selectedIndex = static_cast<int>(i);
-                    DeleteSelected(world, obstacles);
-                    break;
-                }
+        // Delete any old group or previous MEOVV entities if present
+        for (size_t i = entities.size(); i > 0; --i) {
+            size_t idx = i - 1;
+            if (entities[idx].name.find("meovv") != std::string::npos ||
+                entities[idx].name.find("MEOVV_") != std::string::npos) {
+                animatedEntities.erase(entities[idx].id);
+                world.DestroyEntity(entities[idx].id);
+                entities.erase(entities.begin() + idx);
             }
         }
 

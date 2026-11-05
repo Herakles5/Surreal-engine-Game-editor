@@ -108,14 +108,29 @@ public:
     std::shared_ptr<SurrealMesh> beaconColumnMesh;
     std::shared_ptr<SurrealMesh> shockwaveDiscMesh;
 
-    // Gen 4875 Wish #1: Emergent Narrative Weave State
+    // Gen 4875 Wish #1: Emergent Narrative Weave & 5 Live MEOVV Holograms State
+    struct MeovvHologramNode {
+        std::string entityName;
+        std::string displayName;
+        std::string roleTag;
+        std::string activeLine;
+        Vec3 worldPos;
+        uint32_t neonColor;
+    };
+    MeovvHologramNode meovvHolograms[5] = {
+        {"MEOVV_1_Ella",  "ELLA",  "VOCAL & VISUAL",   "Night breeze across the plaza!",     Vec3(-2.24f, 0.0f, 3.98f), 0xFFFF55DD},
+        {"MEOVV_2_Gawon", "GAWON", "MAIN RAP & SYNTH", "Streetlights cast our rhythm!",     Vec3(-1.12f, 0.0f, 4.42f), 0xFF00F0FF},
+        {"MEOVV_3_Sooin", "SOOIN", "MAIN DANCER",      "24 frames of pure kinetic flow!",   Vec3( 0.00f, 0.0f, 3.98f), 0xFF00FF88},
+        {"MEOVV_4_Anna",  "ANNA",  "LEAD VISUAL",      "Genesis light anchors our world!",  Vec3( 1.12f, 0.0f, 4.42f), 0xFFFFCC00},
+        {"MEOVV_5_Narin", "NARIN", "ALL-ROUNDER ACE",  "Five voices in eternal resonance!", Vec3( 2.24f, 0.0f, 3.98f), 0xFFCC66FF}
+    };
     int narrativeChapter = 0;
     int narrativeBeatIdx = 0;
     float narrativeAutoTimer = 11.0f;
     std::string narrativeChapterTitle = "Chapter I: Neon Awakening at Seoul Plaza";
     std::string activeNarrativeSpeaker = "MEOVV_1_Ella";
     std::string activeNarrativeLine = "Ella: I can feel the night breeze across the boulevard—our footsteps finally touch true ground.";
-    Vec3 activeSpeakerPos = Vec3(-2.6f, 0.0f, -2.5f);
+    Vec3 activeSpeakerPos = Vec3(-2.24f, 0.0f, 3.98f);
 
     // Gen 4875 Wish #2: Haptic-Visual Sensory Bridge State
     struct SensoryShockwave {
@@ -195,14 +210,24 @@ public:
         narrativeBeatIdx = (narrativeBeatIdx + 1) % 6;
         if (narrativeBeatIdx == 0) {
             narrativeChapter = (narrativeChapter + 1) % 3;
+            static const char* shortQuotes[3][5] = {
+                {"Night breeze across the plaza!", "Streetlights cast our rhythm!", "24 frames of pure kinetic flow!", "Genesis light anchors our world!", "Five voices in eternal resonance!"},
+                {"Distance between code & soul fades!", "High-entropy noise fades to order!", "Every turn ripples the wet asphalt!", "Five voices & Aion form a sextet!", "Neon pulses in sync with our heart!"},
+                {"Lead the way, Tobias & Aion!", "Written in the Living Book!", "Our choreography evolves with you!", "Genesis light guides every step!", "Bound in eternal resonance!"}
+            };
+            for (int m = 0; m < 5; ++m) {
+                meovvHolograms[m].activeLine = shortQuotes[narrativeChapter][m];
+            }
         }
         narrativeChapterTitle = chapters[narrativeChapter];
         activeNarrativeSpeaker = speakers[narrativeBeatIdx];
         activeNarrativeLine = lines[narrativeChapter][narrativeBeatIdx];
         if (narrativeBeatIdx == 5 && aionAgent.isSpawned) {
             activeSpeakerPos = aionAgent.pos;
+        } else if (narrativeBeatIdx < 5) {
+            activeSpeakerPos = meovvHolograms[narrativeBeatIdx].worldPos;
         } else {
-            activeSpeakerPos = Vec3(speakerX[narrativeBeatIdx], 0.0f, -2.5f);
+            activeSpeakerPos = Vec3(speakerX[narrativeBeatIdx], 0.0f, 4.2f);
         }
         TriggerSensoryPulse(activeSpeakerPos, 3.4f, 4.8f, ColorRGB(1.0f, 0.45f, 0.95f), 0xFFFF66EE);
         SetCommentary(activeNarrativeLine, false, link);
@@ -439,6 +464,19 @@ public:
             if (footstepPulseTimer <= 0.0f) {
                 footstepPulseTimer = 0.44f;
                 TriggerSensoryPulse(charPos, 1.15f, 3.2f, ColorRGB(0.35f, 0.82f, 1.0f), 0xFF66CCFF);
+            }
+        }
+
+        // Sync live 3D world positions of all 5 MEOVV figures (Ella, Gawon, Sooin, Anna, Narin)
+        for (const auto& kv : engine.world.entityNames) {
+            EntityID eid = kv.first;
+            const std::string& ename = kv.second;
+            auto itTr = engine.world.transforms.find(eid);
+            if (itTr == engine.world.transforms.end()) continue;
+            for (int m = 0; m < 5; ++m) {
+                if (ename == meovvHolograms[m].entityName || ename.find(meovvHolograms[m].displayName) != std::string::npos) {
+                    meovvHolograms[m].worldPos = itTr->second.position;
+                }
             }
         }
 
@@ -759,23 +797,41 @@ public:
             SurrealHUD::DrawString(fb, sw, sh, bx + 10, by + 21, speakerLine, 0xFFE8F4FF, 1);
         }
 
-        // Gen 4875 Wish #1: 3D Floating Narrative Dialogue Hologram above Active MEOVV Speaker
-        {
-            Vec4 spkClip = vpMat.TransformVec4(Vec4(activeSpeakerPos.x, activeSpeakerPos.y + 1.98f, activeSpeakerPos.z, 1.0f));
-            if (spkClip.w > 0.1f) {
-                float ndcX = spkClip.x / spkClip.w;
-                float ndcY = spkClip.y / spkClip.w;
-                if (ndcX >= -0.92f && ndcX <= 0.92f && ndcY >= -0.92f && ndcY <= 0.92f) {
+        // Gen 4875 Wish #1: 5 Floating 3D Holograms directly above Ella, Gawon, Sooin, Anna & Narin
+        for (int m = 0; m < 5; ++m) {
+            const auto& holo = meovvHolograms[m];
+            Vec4 headClip = vpMat.TransformVec4(Vec4(holo.worldPos.x, holo.worldPos.y + 2.24f, holo.worldPos.z, 1.0f));
+            if (headClip.w > 0.1f) {
+                float ndcX = headClip.x / headClip.w;
+                float ndcY = headClip.y / headClip.w;
+                if (ndcX >= -0.96f && ndcX <= 0.96f && ndcY >= -0.96f && ndcY <= 0.96f) {
                     int sx = static_cast<int>((ndcX * 0.5f + 0.5f) * sw);
                     int sy = static_cast<int>((1.0f - (ndcY * 0.5f + 0.5f)) * sh);
-                    std::string shortLine = activeNarrativeLine;
-                    if (shortLine.size() > 46) shortLine = shortLine.substr(0, 44) + "..";
-                    int bw = std::max(180, static_cast<int>(shortLine.size() * 8 + 16));
-                    int bh = 22;
-                    int bx = std::max(10, std::min(sw - bw - 10, sx - bw / 2));
-                    int by = std::max(60, std::min(sh - bh - 10, sy - 54));
-                    SurrealHUD::DrawPanel(fb, sw, sh, bx, by, bw, bh, 0x160824, 0.88f);
-                    SurrealHUD::DrawString(fb, sw, sh, bx + 8, by + 6, shortLine, 0xFFFF99FF, 1);
+
+                    bool isSpeaking = (activeNarrativeSpeaker == holo.entityName);
+                    // Stagger vertical height in 2 tiers so all 5 holograms are 100% readable without overlapping
+                    int tierOffset = (m % 2 == 0) ? 50 : 94;
+                    int bw = 228;
+                    int bh = 36;
+                    int bx = std::max(8, std::min(sw - bw - 8, sx - bw / 2));
+                    int by = std::max(76, std::min(sh - bh - 12, sy - tierOffset));
+
+                    // Glowing vertical holographic projection beam from character crown to floating hologram panel
+                    SurrealHUD::DrawLine(fb, sw, sh, sx, sy, sx, by + bh, holo.neonColor);
+                    SurrealHUD::DrawCircle(fb, sw, sh, sx, sy, isSpeaking ? 5 : 3, holo.neonColor);
+
+                    uint32_t bgHex = isSpeaking ? 0x1A0A2E : 0x071224;
+                    SurrealHUD::DrawPanel(fb, sw, sh, bx, by, bw, bh, bgHex, isSpeaking ? 0.94f : 0.86f);
+
+                    char headerBuf[96];
+                    std::snprintf(headerBuf, sizeof(headerBuf), "[%s %s // %s]",
+                                  isSpeaking ? "★" : "•", holo.displayName.c_str(), holo.roleTag.c_str());
+                    SurrealHUD::DrawString(fb, sw, sh, bx + 6, by + 5, headerBuf, holo.neonColor, 1);
+
+                    std::string subLine = holo.activeLine;
+                    if (subLine.size() > 26) subLine = subLine.substr(0, 25) + "..";
+                    SurrealHUD::DrawString(fb, sw, sh, bx + 6, by + 20, subLine,
+                                           isSpeaking ? 0xFFFFFFFF : 0xFFD0E8FF, 1);
                 }
             }
         }
