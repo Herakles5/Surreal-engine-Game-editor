@@ -593,7 +593,7 @@ void main() {
     if (uHasTexture == 1) {
         texSample = texture(uAlbedoMap, vTexCoord);
         if (texSample.a < 0.15) discard; // Alpha cutout for foliage, leaves & grates
-        baseAlbedo *= texSample.rgb * vColor.rgb;
+        baseAlbedo *= texSample.rgb;
         alpha *= texSample.a;
     } else {
         baseAlbedo *= vColor.rgb;
