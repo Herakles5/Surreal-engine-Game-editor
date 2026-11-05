@@ -344,6 +344,10 @@ struct Frustum {
         return true;
     }
 
+    inline bool IsSphereVisible(const Vec3& center, float radius) const {
+        return IntersectsSphere(center, radius);
+    }
+
     inline bool IntersectsAABB(const AABB& box) const {
         for (int i = 0; i < 6; ++i) {
             Vec3 p(

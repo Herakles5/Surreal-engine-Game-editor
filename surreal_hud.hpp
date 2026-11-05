@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include "surreal_math.hpp"
 
 namespace Surreal {
 
@@ -228,6 +229,99 @@ public:
         }
     }
 
+    static void DrawLine(uint32_t* fb, int screenW, int screenH, int x0, int y0, int x1, int y1, uint32_t color) {
+        int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+        int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+        int err = dx + dy;
+        while (true) {
+            if (x0 >= 0 && x0 < screenW && y0 >= 0 && y0 < screenH) {
+                fb[y0 * screenW + x0] = color;
+            }
+            if (x0 == x1 && y0 == y1) break;
+            int e2 = 2 * err;
+            if (e2 >= dy) { err += dy; x0 += sx; }
+            if (e2 <= dx) { err += dx; y0 += sy; }
+        }
+    }
+
+    static void DrawCircle(uint32_t* fb, int screenW, int screenH, int cx, int cy, int radius, uint32_t color) {
+        for (int y = -radius; y <= radius; ++y) {
+            for (int x = -radius; x <= radius; ++x) {
+                if (x*x + y*y <= radius*radius) {
+                    int px = cx + x, py = cy + y;
+                    if (px >= 0 && px < screenW && py >= 0 && py < screenH) {
+                        fb[py * screenW + px] = color;
+                    }
+                }
+            }
+        }
+    }
+
+    static bool WorldToScreen(const Vec3& worldPos, const Mat4& vpMat, int screenW, int screenH, int& outX, int& outY) {
+        Vec4 clip = vpMat.TransformVec4(Vec4(worldPos.x, worldPos.y, worldPos.z, 1.0f));
+        if (clip.w <= 0.001f) return false;
+        float ndcX = clip.x / clip.w;
+        float ndcY = clip.y / clip.w;
+        if (ndcX < -1.2f || ndcX > 1.2f || ndcY < -1.2f || ndcY > 1.2f) return false;
+        outX = static_cast<int>((ndcX * 0.5f + 0.5f) * screenW);
+        outY = static_cast<int>((1.0f - (ndcY * 0.5f + 0.5f)) * screenH);
+        return true;
+    }
+
+    static void DrawBareMetalButton(
+        uint32_t* fb, int screenW, int screenH,
+        int x, int y, int w, int h,
+        const std::string& label,
+        uint32_t textColor, uint32_t borderColor, uint32_t bgColor,
+        bool hovered = false, bool pressed = false)
+    {
+        uint32_t effBg = pressed ? 0x050E1A : (hovered ? 0x122238 : bgColor);
+        DrawPanel(fb, screenW, screenH, x, y, w, h, effBg, hovered ? 0.96f : 0.88f);
+
+        uint32_t effBorder = hovered ? 0xFFFFFFFF : borderColor;
+        int minX = std::max(0, x);
+        int maxX = std::min(screenW - 1, x + w);
+        int minY = std::max(0, y);
+        int maxY = std::min(screenH - 1, y + h);
+
+        // Border frame
+        for (int px = minX; px <= maxX; ++px) {
+            fb[minY * screenW + px] = effBorder;
+            fb[maxY * screenW + px] = effBorder;
+        }
+        for (int py = minY; py <= maxY; ++py) {
+            fb[py * screenW + minX] = effBorder;
+            fb[py * screenW + maxX] = effBorder;
+        }
+
+        // Cyber corner notch accents
+        for (int i = 0; i < 4; ++i) {
+            if (minY + 1 < screenH) {
+                if (minX + i < screenW) fb[(minY + 1) * screenW + minX + i] = 0xFF00FFCC;
+                if (maxX - i >= 0)      fb[(minY + 1) * screenW + maxX - i] = 0xFF00FFCC;
+            }
+            if (maxY - 1 >= 0) {
+                if (minX + i < screenW) fb[(maxY - 1) * screenW + minX + i] = 0xFF00FFCC;
+                if (maxX - i >= 0)      fb[(maxY - 1) * screenW + maxX - i] = 0xFF00FFCC;
+            }
+        }
+
+        // Text width calculation
+        int textW = 0;
+        for (size_t i = 0; i < label.size(); ++i) {
+            unsigned char uc = static_cast<unsigned char>(label[i]);
+            if (uc >= 0x80) {
+                size_t len = (uc >= 0xF0) ? 4 : (uc >= 0xE0) ? 3 : 2;
+                i += len - 1;
+            }
+            textW += 8;
+        }
+        int tx = x + std::max(4, (w - textW) / 2);
+        int ty = y + (h - 8) / 2;
+        if (pressed) { tx += 1; ty += 1; }
+        DrawString(fb, screenW, screenH, tx, ty, label, hovered ? 0xFFFFFFFF : textColor, 1);
+    }
+
     /**
      * Render Full Interactive HUD Overlay
      */
@@ -295,8 +389,8 @@ public:
 
         // Controls hint
         DrawString(fb, screenW, screenH, panelX + 12, panelY + 172, "[SPACE] Jump | [WASD] Run | [Q/E] Cam Orbit", 0xFF00FFCC, 1);
-        DrawString(fb, screenW, screenH, panelX + 12, panelY + 186, "[N] Sky/Atmosphere | [E] Dance Duet", 0xFF00E5FF, 1);
-        DrawString(fb, screenW, screenH, panelX + 12, panelY + 200, "[V] Cycle Dancer/Avatar | [P] Pause | [B] Bench", 0xFFFFAA00, 1);
+        DrawString(fb, screenW, screenH, panelX + 12, panelY + 186, "[N] Sky | [E] Duet | [T] Swap Character | [C] AI Mode", 0xFF00E5FF, 1);
+        DrawString(fb, screenW, screenH, panelX + 12, panelY + 200, "[V] Cycle Dancer | [P] Pause | [B] Bench | [G] GM Console", 0xFFFFAA00, 1);
 
         // 2. Active Benchmark Progress Banner (Positioned cleanly below top bar)
         if (isBenchmarkRunning) {

@@ -14,6 +14,7 @@
 #include "surreal_hud.hpp"
 #include "surreal_model_loader.hpp"
 #include "surreal_image3d.hpp"
+#include "surreal_auto_rig.hpp"
 #include <vector>
 #include <string>
 #include <fstream>
@@ -34,6 +35,7 @@ struct EditableEntity {
     std::string name;
     Vec3 position;
     Vec3 scale;
+    float yaw;
     ColorRGB color;
     float metallic;
     float roughness;
@@ -41,7 +43,7 @@ struct EditableEntity {
     bool isCharacter;
 
     EditableEntity()
-        : id(INVALID_ENTITY), name("Entity"), position(0,0,0), scale(1,1,1),
+        : id(INVALID_ENTITY), name("Entity"), position(0,0,0), scale(1,1,1), yaw(0.0f),
           color(1,1,1), metallic(0.1f), roughness(0.5f),
           isStaticTerrain(false), isCharacter(false) {}
 };
@@ -100,6 +102,23 @@ public:
     // Placed skeletal animated entities (NPC dancers in the world)
     std::shared_ptr<SkeletalMeshInstance> placementSkeletal;
     std::unordered_map<EntityID, std::shared_ptr<SkeletalMeshInstance>> animatedEntities;
+
+    // Bare-Metal TopBar Buttons
+    struct TopBarButton {
+        std::string id;
+        std::string label;
+        int x = 0, y = 0, w = 0, h = 0;
+        uint32_t borderColor = 0xFF00FFCC;
+        uint32_t textColor = 0xFFE0E0E0;
+        uint32_t bgColor = 0x08101E;
+        bool isHovered = false;
+        bool isPressed = false;
+
+        bool Contains(int mx, int my) const {
+            return mx >= x && mx <= x + w && my >= y && my <= y + h;
+        }
+    };
+    std::vector<TopBarButton> topButtons;
 
     int catalogPage = 0;
     static constexpr int ITEMS_PER_PAGE = 8;
@@ -298,7 +317,7 @@ public:
             case CatalogCategory::DANCERS:      return longName ? "DANCING MODELS" : "DANCERS";
             case CatalogCategory::AVATARS:      return longName ? "AION AVATARS" : "AVATARS";
             case CatalogCategory::WORLDS_PROPS: return longName ? "WORLDS & PROPS" : "WORLDS";
-            case CatalogCategory::PHOTO3D:      return longName ? "PHOTO -> 3D (Bilder)" : "PHOTO3D";
+            case CatalogCategory::PHOTO3D:      return longName ? "PHOTO -> 3D (IMAGES)" : "PHOTO3D";
             default:                            return longName ? "ALL MODELS" : "ALL";
         }
     }
@@ -479,19 +498,23 @@ public:
             } else if (isEnvironment) {
                 scaleFactor = 1.0f; // Keep real-world 1:1 scale for cities & environments!
             } else if (IsDanceModel(file.filename) || IsAvatarModel(file.filename)) {
-                // Humanoid characters: normalize height to ~1.80m tall
+                // Humanoid / creature characters: normalize height to ~1.45m tall (or ~2.40m for dragon)
                 float charHeight = placementMesh->worldBounds.max.y - placementMesh->worldBounds.min.y;
+                float targetH = 1.45f;
+                std::string lowerFn = file.filename;
+                for (char& c : lowerFn) c = tolower(c);
+                if (lowerFn.find("dragon") != std::string::npos) targetH = 2.40f;
                 if (charHeight > 0.0001f) {
-                    scaleFactor = 1.80f / charHeight;
+                    scaleFactor = targetH / charHeight;
                 } else {
-                    scaleFactor = 1.8f / maxDim;
+                    scaleFactor = targetH / maxDim;
                 }
             } else if (maxDim > 50.0f) {
-                scaleFactor = 2.0f / maxDim;
-            } else if (maxDim < 0.2f) {
                 scaleFactor = 1.5f / maxDim;
+            } else if (maxDim < 0.2f) {
+                scaleFactor = 1.2f / maxDim;
             } else {
-                scaleFactor = 1.8f / maxDim;
+                scaleFactor = 1.45f / maxDim;
             }
         }
         placementScale = Vec3(scaleFactor, scaleFactor, scaleFactor);
@@ -500,6 +523,90 @@ public:
         showModelCatalog = false;
         isPlacingModel = true;
         SetStatus("[+] PLACING: " + placementName + " | Move Mouse, Left-Click to drop, [R] Rotate, [ESC] Cancel", 5.0f);
+    }
+
+    bool LoadModelFromPath(const std::string& fullPath, const Image3DOptions& userOpt = Image3DOptions()) {
+        DiscoveredModelFile file;
+        file.fullPath = fullPath;
+        size_t lastSlash = fullPath.find_last_of("/\\");
+        file.filename = (lastSlash == std::string::npos) ? fullPath : fullPath.substr(lastSlash + 1);
+        size_t dot = file.filename.find_last_of('.');
+        file.extension = (dot == std::string::npos) ? "" : file.filename.substr(dot);
+        for (char& c : file.extension) c = tolower(c);
+
+        placementScale = Vec3(1.0f, 1.0f, 1.0f);
+        placementYaw = 0.0f;
+        placementColor = ColorRGB(1.0f, 1.0f, 1.0f);
+        placementMetallic = 0.25f;
+        placementRoughness = 0.45f;
+        placementSkeletal = nullptr;
+
+        bool loaded = false;
+        bool isPhoto = IsImageFile(file);
+        if (isPhoto) {
+            Image3DInfo info;
+            placementMesh = SurrealImage3D::BuildFromFile(file.fullPath, userOpt, &info);
+            loaded = (placementMesh != nullptr);
+            placementMetallic = 0.05f;
+            placementRoughness = 0.85f;
+            if (!loaded) {
+                SetStatus("[-] Photo->3D: " + info.error, 5.0f);
+                return false;
+            }
+        } else if (file.extension == ".obj") {
+            placementColor = colorPalette[currentPaletteIdx % colorPalette.size()];
+            loaded = SurrealModelLoader::LoadCustomFile(file.fullPath, placementMesh, placementColor);
+        } else if (file.extension == ".gltf" || file.extension == ".glb") {
+            auto inst = std::make_shared<SkeletalMeshInstance>();
+            loaded = SurrealSkeletalLoader::LoadSkeletalModel(file.fullPath, *inst);
+            if (loaded) {
+                placementMesh = inst->activeDeformedMesh;
+                placementSkeletal = inst;
+            }
+        }
+
+        if (!loaded || !placementMesh) {
+            SetStatus("[-] Failed to load 3D model file: " + file.filename, 4.0f);
+            return false;
+        }
+
+        std::string baseName = GetCleanName(file.filename);
+        placementName = baseName + "_" + std::to_string(entities.size() + 1);
+
+        placementMesh->CalculateBounds();
+        Vec3 ext = placementMesh->worldBounds.Extents() * 2.0f;
+        float maxDim = std::max({ext.x, ext.y, ext.z});
+        float scaleFactor = 1.0f;
+        if (maxDim > 0.001f) {
+            bool isEnvironment = (baseName.find("City") != std::string::npos ||
+                                  baseName.find("Seoul") != std::string::npos ||
+                                  baseName.find("Metropolis") != std::string::npos ||
+                                  baseName.find("Building") != std::string::npos ||
+                                  baseName.find("District") != std::string::npos);
+            if (isPhoto) {
+                scaleFactor = 1.0f;
+            } else if (isEnvironment) {
+                scaleFactor = 1.0f;
+            } else if (IsDanceModel(file.filename) || IsAvatarModel(file.filename)) {
+                float charHeight = placementMesh->worldBounds.max.y - placementMesh->worldBounds.min.y;
+                float targetH = 1.45f;
+                std::string lowerFn = file.filename;
+                for (char& c : lowerFn) c = tolower(c);
+                if (lowerFn.find("dragon") != std::string::npos) targetH = 2.40f;
+                if (charHeight > 0.0001f) {
+                    scaleFactor = targetH / charHeight;
+                } else {
+                    scaleFactor = targetH / maxDim;
+                }
+            } else {
+                scaleFactor = 2.2f / maxDim;
+            }
+        }
+        placementScale = Vec3(scaleFactor, scaleFactor, scaleFactor);
+        isPlacingModel = true;
+        showModelCatalog = false;
+        activePreset = ModelPresetType::CUSTOM_FILE;
+        return true;
     }
 
     void SelectBuiltinPreset(int presetIdx, const std::shared_ptr<SurrealMesh>& avatarMesh = nullptr) {
@@ -632,6 +739,7 @@ public:
         ed.name = placementName;
         ed.position = placementPos;
         ed.scale = placementScale;
+        ed.yaw = placementYaw;
         ed.color = placementColor;
         ed.metallic = placementMetallic;
         ed.roughness = placementRoughness;
@@ -683,19 +791,46 @@ public:
     // Scale selected entity
     void ScaleSelected(float factor, SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
         EditableEntity* ent = GetSelectedEntity();
-        if (!ent || ent->name == "CyberGridFloor" || ent->isCharacter) return;
+        if (!ent || ent->name == "CyberGridFloor" || ent->name == "MetropolisGroundFloor") return;
 
         ent->scale = ent->scale * factor;
-        ent->scale.x = std::max(0.01f, ent->scale.x);
-        ent->scale.y = std::max(0.01f, ent->scale.y);
-        ent->scale.z = std::max(0.01f, ent->scale.z);
+        ent->scale.x = std::max(0.01f, std::min(100.0f, ent->scale.x));
+        ent->scale.y = std::max(0.01f, std::min(100.0f, ent->scale.y));
+        ent->scale.z = std::max(0.01f, std::min(100.0f, ent->scale.z));
 
         if (world.transforms.find(ent->id) != world.transforms.end()) {
             world.transforms[ent->id].scale = ent->scale;
         }
 
         SyncObstacles(obstacles);
-        SetStatus("Scaled " + ent->name + " -> (" + FormatVec(ent->scale) + ")");
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "[✓] Scaled %s -> (%.2f, %.2f, %.2f)",
+                      ent->name.c_str(), ent->scale.x, ent->scale.y, ent->scale.z);
+        SetStatus(buf, 2.5f);
+    }
+
+    void RotateSelected(float deltaYaw, SurrealWorld& world) {
+        EditableEntity* ent = GetSelectedEntity();
+        if (!ent || ent->name == "CyberGridFloor" || ent->name == "MetropolisGroundFloor" || ent->isStaticTerrain) return;
+
+        ent->yaw += deltaYaw;
+        if (world.transforms.find(ent->id) != world.transforms.end()) {
+            world.transforms[ent->id].rotation = Quat::FromAxisAngle(Vec3(0, 1.0f, 0), ent->yaw);
+        }
+        int deg = static_cast<int>(std::round(ent->yaw * 180.0f / M_PI)) % 360;
+        if (deg < 0) deg += 360;
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "[⟳] Rotated %s -> %d°", ent->name.c_str(), deg);
+        SetStatus(buf, 2.5f);
+    }
+
+    void FocusOnSelected() {
+        EditableEntity* ent = GetSelectedEntity();
+        if (!ent) return;
+        flyCamPos = ent->position + Vec3(0, 0.75f, 3.2f);
+        flyCamPitch = -0.06f;
+        flyCamYaw = 0.0f;
+        SetStatus("[🎯 FOCUS] Framed camera on " + ent->name, 2.5f);
     }
 
     // Cycle material color
@@ -846,9 +981,145 @@ public:
         SetStatus("[-] Deleted Entity: " + delName);
     }
 
-    void UpdateAnimations(float dt) {
+    uint64_t animFrameCounter = 0;
+
+    void UpdateAnimations(float dt, const SurrealWorld* world = nullptr, const Frustum* camFrustum = nullptr, const Vec3* camPos = nullptr) {
+        ++animFrameCounter;
+        size_t idx = 0;
         for (auto& pair : animatedEntities) {
-            if (pair.second) pair.second->Update(dt);
+            auto& skel = pair.second;
+            if (!skel) continue;
+            ++idx;
+
+            // Always run full deformation on first initialization frame
+            if (!skel->hasFootBaseOffset || !skel->staticAttributesInitialized) {
+                skel->Update(dt);
+                continue;
+            }
+
+            // Gen 4833/4834 Topological Manifold Pruning: Cull off-screen NPC skeletal deformation
+            if (world && camFrustum) {
+                auto itTr = world->transforms.find(pair.first);
+                if (itTr != world->transforms.end()) {
+                    Vec3 center = itTr->second.position + Vec3(0.0f, 0.9f, 0.0f);
+                    if (!camFrustum->IsSphereVisible(center, 2.4f)) {
+                        // Advance clock without CPU vertex skinning while outside view frustum
+                        if (skel->activeClipIndex >= 0 && skel->activeClipIndex < (int)skel->clips.size()) {
+                            const float dur = skel->clips[skel->activeClipIndex].duration;
+                            if (dur > 0.0f) {
+                                skel->currentTime = fmodf(skel->currentTime + dt * skel->playbackSpeed, dur);
+                            }
+                        }
+                        continue;
+                    }
+                    if (camPos && (*camPos - itTr->second.position).Length() > 28.0f && ((animFrameCounter + idx) & 3) != 0) {
+                        continue;
+                    }
+                }
+            }
+
+            // 2-Phase Interleaved Topological Cadence for multi-NPC crowds (>2 animated NPCs)
+            if (animatedEntities.size() > 2) {
+                if (((animFrameCounter + idx) & 1) == 0) {
+                    skel->Update(dt * 2.0f);
+                }
+            } else {
+                skel->Update(dt);
+            }
+        }
+    }
+
+    bool AutoSegmentGroupIntoFigures(
+        const std::string& groupImagePath,
+        SurrealWorld& world,
+        std::vector<ObstacleBox>& obstacles,
+        float spacingOffset = 0.0f)
+    {
+        SetStatus("[*] Aion Auto-Rigger: Segmenting group photo & synthesizing skeletons...", 5.0f);
+
+        // Delete any old flat single group entity if present
+        std::vector<EntityID> toRemove;
+        for (const auto& e : entities) {
+            if (e.name.find("meovv") != std::string::npos && e.name.find("MEOVV_") == std::string::npos) {
+                toRemove.push_back(e.id);
+            }
+        }
+        for (auto id : toRemove) {
+            for (size_t i = 0; i < entities.size(); ++i) {
+                if (entities[i].id == id) {
+                    selectedIndex = static_cast<int>(i);
+                    DeleteSelected(world, obstacles);
+                    break;
+                }
+            }
+        }
+
+        Image3DOptions opt;
+        opt.ironingPasses = 120;
+        opt.heightMeters = 2.20f;
+        auto figures = SurrealAutoRigger::SegmentGroupAndRig(groupImagePath, opt, spacingOffset);
+        if (figures.empty()) {
+            SetStatus("[-] Auto-Rigger failed to segment group.", 4.0f);
+            return false;
+        }
+
+        int firstAddedIdx = -1;
+        for (const auto& fig : figures) {
+            EntityID newId = world.CreateEntity(fig.name);
+            TransformComponent tr;
+            tr.position = fig.worldPosition;
+            tr.scale = Vec3(1.0f, 1.0f, 1.0f);
+            tr.rotation = Quat(0, 0, 0, 1.0f);
+            world.transforms[newId] = tr;
+
+            PBRMaterial mat;
+            mat.albedo = ColorRGB(1.0f, 1.0f, 1.0f);
+            mat.metallic = 0.05f;
+            mat.roughness = 0.85f;
+            world.meshRenderers[newId] = MeshRendererComponent();
+            world.meshRenderers[newId].mesh = fig.mesh;
+            world.meshRenderers[newId].material = mat;
+
+            EditableEntity ed;
+            ed.id = newId;
+            ed.name = fig.name;
+            ed.position = fig.worldPosition;
+            ed.scale = Vec3(1.0f, 1.0f, 1.0f);
+            ed.yaw = 0.0f;
+            ed.color = ColorRGB(1.0f, 1.0f, 1.0f);
+            ed.metallic = 0.05f;
+            ed.roughness = 0.85f;
+            ed.isStaticTerrain = false;
+            ed.isCharacter = true;
+
+            entities.push_back(ed);
+            if (firstAddedIdx == -1) firstAddedIdx = static_cast<int>(entities.size() - 1);
+
+            if (fig.skeletal) {
+                animatedEntities[newId] = fig.skeletal;
+            }
+        }
+
+        if (firstAddedIdx >= 0) selectedIndex = firstAddedIdx;
+        flyCamPos = Vec3(0.0f, 1.35f, 7.8f);
+        flyCamPitch = -0.05f;
+        flyCamYaw = 0.0f;
+        SyncObstacles(obstacles);
+        SetStatus("[✓] 5 MEOVV figures rigged & segmented! Select [N/P] to move individually.", 6.0f);
+        return true;
+    }
+
+    void CycleSelectedAnimation() {
+        EditableEntity* ent = GetSelectedEntity();
+        if (!ent) return;
+        auto it = animatedEntities.find(ent->id);
+        if (it != animatedEntities.end() && it->second) {
+            auto& skel = it->second;
+            if (!skel->clips.empty()) {
+                int nextClip = (skel->activeClipIndex + 1) % skel->clips.size();
+                skel->PlayClip(nextClip, true);
+                SetStatus("[★ ANIM] " + ent->name + " playing clip: " + skel->clips[nextClip].name, 3.5f);
+            }
         }
     }
 
@@ -1022,17 +1293,101 @@ public:
 
     // Render 3D World Editor HUD & Outliner & Inspector & Spawner Modals
     void RenderEditorHUD(uint32_t* fb, int screenW, int screenH, float currentFps, float frameTimeMs, const std::string& backendName) {
-        // Top Status Header
-        std::string modeTitle = (mode == EditorMode::EDIT_MODE) ? "SURREAL STUDIO // [EDIT MODE]" : "SURREAL STUDIO // [PLAY MODE]";
+        // Top Status Header Panel
+        SurrealHUD::DrawPanel(fb, screenW, screenH, 12, 10, screenW - 24, 42, 0x050812, 0.92f);
+
+        std::string modeTitle = (mode == EditorMode::EDIT_MODE) ? "SURREAL // [EDIT]" : "SURREAL // [PLAY]";
         uint32_t modeColor = (mode == EditorMode::EDIT_MODE) ? 0xFFFF007F : 0xFF00FFCC;
+        SurrealHUD::DrawString(fb, screenW, screenH, 22, 26, modeTitle, modeColor, 1);
 
-        SurrealHUD::DrawPanel(fb, screenW, screenH, 12, 12, screenW - 24, 38, 0x050812, 0.90f);
-        SurrealHUD::DrawString(fb, screenW, screenH, 24, 22, modeTitle, modeColor, 1);
+        // Update TopBar Bare-Metal Buttons Layout
+        topButtons.clear();
+        int btnY = 16;
+        int btnH = 30;
+        int curX = 180;
 
-        char metaBuf[256];
-        std::snprintf(metaBuf, sizeof(metaBuf), "FPS: %.1f | %s | [TAB] Switch | [N] Sky | [E] Dance",
+        // 1. [ 📸 Image -> 3D ] Button
+        TopBarButton bPhoto;
+        bPhoto.id = "photo_3d";
+        bPhoto.label = "+ Image->3D [F3]";
+        bPhoto.x = curX; bPhoto.y = btnY; bPhoto.w = 144; bPhoto.h = btnH;
+        bPhoto.borderColor = 0xFF00FFCC; // Cyan
+        bPhoto.textColor = 0xFF00FFCC;
+        bPhoto.bgColor = 0x0A1828;
+        topButtons.push_back(bPhoto);
+        curX += bPhoto.w + 8;
+
+        // 2. [ 💃 Rig 3D Group ] Button
+        TopBarButton bRig;
+        bRig.id = "rig_group";
+        bRig.label = "Rig Group [F4]";
+        bRig.x = curX; bRig.y = btnY; bRig.w = 130; bRig.h = btnH;
+        bRig.borderColor = 0xFFBF00FF; // Neon Violet
+        bRig.textColor = 0xFFBF00FF;
+        bRig.bgColor = 0x1A0828;
+        topButtons.push_back(bRig);
+        curX += bRig.w + 8;
+
+        // 3. [ ⚙️ Settings ] Button
+        TopBarButton bSettings;
+        bSettings.id = "settings";
+        bSettings.label = "Settings [F2]";
+        bSettings.x = curX; bSettings.y = btnY; bSettings.w = 126; bSettings.h = btnH;
+        bSettings.borderColor = 0xFFFF007F; // Magenta
+        bSettings.textColor = 0xFFFF007F;
+        bSettings.bgColor = 0x1A0D22;
+        topButtons.push_back(bSettings);
+        curX += bSettings.w + 8;
+
+        // 4. [ 📁 3D Catalog ] Button
+        TopBarButton bCat;
+        bCat.id = "catalog";
+        bCat.label = "Catalog [L]";
+        bCat.x = curX; bCat.y = btnY; bCat.w = 112; bCat.h = btnH;
+        bCat.borderColor = 0xFFFFCC00; // Amber
+        bCat.textColor = 0xFFFFCC00;
+        bCat.bgColor = 0x1C1808;
+        topButtons.push_back(bCat);
+        curX += bCat.w + 8;
+
+        if (screenW >= 1020) {
+            // 4. [ 💾 Save ] Button
+            TopBarButton bSave;
+            bSave.id = "save";
+            bSave.label = "Save [F6]";
+            bSave.x = curX; bSave.y = btnY; bSave.w = 96; bSave.h = btnH;
+            bSave.borderColor = 0xFF00FF88; // Neon Green
+            bSave.textColor = 0xFF00FF88;
+            bSave.bgColor = 0x0A2016;
+            topButtons.push_back(bSave);
+            curX += bSave.w + 8;
+
+            // 5. [ 📂 Load ] Button
+            TopBarButton bLoad;
+            bLoad.id = "load";
+            bLoad.label = "Load [F7]";
+            bLoad.x = curX; bLoad.y = btnY; bLoad.w = 96; bLoad.h = btnH;
+            bLoad.borderColor = 0xFF00E5FF; // Sky Blue
+            bLoad.textColor = 0xFF00E5FF;
+            bLoad.bgColor = 0x081C28;
+            topButtons.push_back(bLoad);
+            curX += bLoad.w + 8;
+        }
+
+        // Render Bare-Metal Buttons
+        for (const auto& btn : topButtons) {
+            SurrealHUD::DrawBareMetalButton(
+                fb, screenW, screenH,
+                btn.x, btn.y, btn.w, btn.h,
+                btn.label, btn.textColor, btn.borderColor, btn.bgColor,
+                btn.isHovered, btn.isPressed
+            );
+        }
+
+        char metaBuf[128];
+        std::snprintf(metaBuf, sizeof(metaBuf), "FPS: %.1f | %s | [TAB]",
                       currentFps, backendName.c_str());
-        SurrealHUD::DrawString(fb, screenW, screenH, screenW - 480, 22, metaBuf, 0xFF00FF88, 1);
+        SurrealHUD::DrawString(fb, screenW, screenH, screenW - 270, 26, metaBuf, 0xFF00FF88, 1);
 
         // In EDIT_MODE: Render Scene Outliner & Inspector
         if (mode == EditorMode::EDIT_MODE) {
@@ -1094,13 +1449,13 @@ public:
                 }
                 SurrealHUD::DrawString(fb, screenW, screenH, panelX + 62, inspectorY + 88, "Albedo Color [C]", 0xFFE0E0E0, 1);
 
-                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 112, "[L] Load & Place Model", 0xFF00FF88, 1);
-                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 126, "[I/K/J/L/U/O] Move Keys", 0xFF00FFCC, 1);
-                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 142, "[+/-] Scale Entity [H]", 0xFFFFAA00, 1);
-                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 156, "[K] Spawn Box | [SH+D] Clone", 0xFFFF007F, 1);
-                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 170, "[DEL] Delete Entity", 0xFFFF3366, 1);
-                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 188, "[F6] Save | [F7] Load JSON", 0xFF00FF88, 1);
-                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 202, "[F9] Toggle CPU/GPU Hybrid", 0xFF00E5FF, 1);
+                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 112, "[F4] Rig 3D Group Figures", 0xFFBF00FF, 1);
+                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 126, "[V] Anim Cycle | [H] Bones", 0xFF00FFCC, 1);
+                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 140, "[I/K/J/L/U/O] Move Figure", 0xFF00FF88, 1);
+                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 154, "[+/-] Scale | [R]/[T] Rotate", 0xFFFFAA00, 1);
+                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 168, "[DEL] Delete | [SH+D] Clone", 0xFFFF007F, 1);
+                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 184, "[F6] Save | [F7] Load JSON", 0xFF00E5FF, 1);
+                SurrealHUD::DrawString(fb, screenW, screenH, panelX + 14, inspectorY + 198, "[F9] Toggle CPU/GPU Hybrid", 0xFF88AAFF, 1);
             }
         }
 

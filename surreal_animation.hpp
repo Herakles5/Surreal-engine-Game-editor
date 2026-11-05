@@ -161,6 +161,7 @@ public:
     std::vector<int> skinJointNodeIndices; // Mapping from skin joint index to joints[]
     std::vector<Mat4> skinJointIBMs; // Inverse bind matrices per skin joint
     std::vector<Mat4> skinMatrices; // Evaluated skin matrices per skin joint
+    std::vector<uint8_t> evalDone;  // Cached FK visitation flags (zero per-frame heap alloc)
     std::vector<AnimationClip> clips;
     std::vector<SkinnedVertex3D> bindVertices;
     std::shared_ptr<SurrealMesh> activeDeformedMesh;
@@ -170,8 +171,10 @@ public:
     float playbackSpeed;
     bool isLooping;
     bool hasFootBaseOffset;
+    bool staticAttributesInitialized = false;
     float footBaseOffset;
     bool isZUpModel;
+    bool dirtyGPUUpload = true;
 
     SkeletalMeshInstance()
         : activeDeformedMesh(std::make_shared<SurrealMesh>()),
@@ -223,26 +226,30 @@ public:
 
                     if (chan.keyTimes.size() < 2) continue;
 
-                    // Locate keyframe interval
-                    for (size_t k = 0; k < chan.keyTimes.size() - 1; ++k) {
-                        float t0 = chan.keyTimes[k];
-                        float t1 = chan.keyTimes[k + 1];
+                    // O(log N) binary search for keyframe interval
+                    auto itUpper = std::upper_bound(chan.keyTimes.begin(), chan.keyTimes.end(), currentTime);
+                    size_t k = 0;
+                    if (itUpper == chan.keyTimes.begin()) {
+                        k = 0;
+                    } else if (itUpper == chan.keyTimes.end()) {
+                        k = chan.keyTimes.size() - 2;
+                    } else {
+                        k = static_cast<size_t>(std::distance(chan.keyTimes.begin(), itUpper)) - 1;
+                    }
 
-                        if (currentTime >= t0 && currentTime <= t1) {
-                            float factor = (t1 > t0) ? (currentTime - t0) / (t1 - t0) : 0.0f;
+                    float t0 = chan.keyTimes[k];
+                    float t1 = chan.keyTimes[k + 1];
+                    float factor = (t1 > t0) ? std::clamp((currentTime - t0) / (t1 - t0), 0.0f, 1.0f) : 0.0f;
 
-                            if (chan.target == ChannelTarget::TRANSLATION && k < chan.vecValues.size() - 1) {
-                                joint.localTranslation = Lerp(chan.vecValues[k], chan.vecValues[k + 1], factor);
-                                joint.hasExplicitMatrix = false;
-                            } else if (chan.target == ChannelTarget::ROTATION && k < chan.quatValues.size() - 1) {
-                                joint.localRotation = Slerp(chan.quatValues[k], chan.quatValues[k + 1], factor);
-                                joint.hasExplicitMatrix = false;
-                            } else if (chan.target == ChannelTarget::SCALE && k < chan.vecValues.size() - 1) {
-                                joint.localScale = Lerp(chan.vecValues[k], chan.vecValues[k + 1], factor);
-                                joint.hasExplicitMatrix = false;
-                            }
-                            break;
-                        }
+                    if (chan.target == ChannelTarget::TRANSLATION && k < chan.vecValues.size() - 1) {
+                        joint.localTranslation = Lerp(chan.vecValues[k], chan.vecValues[k + 1], factor);
+                        joint.hasExplicitMatrix = false;
+                    } else if (chan.target == ChannelTarget::ROTATION && k < chan.quatValues.size() - 1) {
+                        joint.localRotation = Slerp(chan.quatValues[k], chan.quatValues[k + 1], factor);
+                        joint.hasExplicitMatrix = false;
+                    } else if (chan.target == ChannelTarget::SCALE && k < chan.vecValues.size() - 1) {
+                        joint.localScale = Lerp(chan.vecValues[k], chan.vecValues[k + 1], factor);
+                        joint.hasExplicitMatrix = false;
                     }
                 }
             }
@@ -257,7 +264,11 @@ public:
             }
         }
 
-        std::vector<bool> evalDone(joints.size(), false);
+        if (evalDone.size() != joints.size()) {
+            evalDone.resize(joints.size(), 0);
+        } else {
+            std::fill(evalDone.begin(), evalDone.end(), 0);
+        }
         auto evalGlobal = [&](auto& self, int idx) -> void {
             if (evalDone[idx]) return;
             SkeletonJoint& j = joints[idx];
@@ -267,7 +278,7 @@ public:
             } else {
                 j.globalMatrix = j.localMatrix;
             }
-            evalDone[idx] = true;
+            evalDone[idx] = 1;
         };
         for (size_t i = 0; i < joints.size(); ++i) {
             evalGlobal(evalGlobal, static_cast<int>(i));
@@ -299,8 +310,16 @@ private:
     void DeformMesh() {
         if (!activeDeformedMesh) return;
         const size_t vertCount = bindVertices.size();
-        if (activeDeformedMesh->vertices.size() != vertCount) {
+        bool needsBoundsInit = false;
+        if (activeDeformedMesh->vertices.size() != vertCount || !staticAttributesInitialized) {
             activeDeformedMesh->vertices.resize(vertCount);
+            for (size_t i = 0; i < vertCount; ++i) {
+                activeDeformedMesh->vertices[i].u = bindVertices[i].u;
+                activeDeformedMesh->vertices[i].v = bindVertices[i].v;
+                activeDeformedMesh->vertices[i].color = bindVertices[i].color;
+            }
+            staticAttributesInitialized = true;
+            needsBoundsInit = true;
         }
 
         const size_t numSkinMatrices = skinMatrices.size();
@@ -311,50 +330,71 @@ private:
             float minGroundY = 1e9f;
             for (size_t i = 0; i < vertCount; ++i) {
                 const SkinnedVertex3D& b = bindVertices[i];
-                Vec3 skinnedPos(0, 0, 0);
+                float sy = 0.0f;
                 for (int w = 0; w < 4; ++w) {
                     float weight = b.weights[w];
                     if (weight > 0.0001f && b.joints[w] < numSkinMatrices) {
-                        const Mat4& skinM = skinMatrices[b.joints[w]];
-                        skinnedPos = skinnedPos + (skinM.TransformPoint(b.position) * weight);
+                        const Mat4& sm = skinMatrices[b.joints[w]];
+                        sy += (sm.m[1][0] * b.position.x + sm.m[1][1] * b.position.y + sm.m[1][2] * b.position.z + sm.m[1][3]) * weight;
                     }
                 }
-                if (skinnedPos.y < minGroundY) minGroundY = skinnedPos.y;
+                if (sy < minGroundY) minGroundY = sy;
             }
             footBaseOffset = minGroundY;
             hasFootBaseOffset = true;
+            needsBoundsInit = true;
         }
 
         const float footOffset = footBaseOffset;
+        const Mat4* __restrict skinMatPtr = skinMatrices.data();
+        const SkinnedVertex3D* __restrict bindPtr = bindVertices.data();
+        Vertex3D* __restrict outPtr = activeDeformedMesh->vertices.data();
 
-        // Multi-threaded Linear Blend Skinning (LBS) via OpenMP
+        // Multi-threaded Pre-Blended 3x4 Affine Linear Blend Skinning (LBS) via OpenMP
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < (int)vertCount; ++i) {
-            const SkinnedVertex3D& b = bindVertices[i];
-            Vec3 skinnedPos(0, 0, 0);
-            Vec3 skinnedNorm(0, 0, 0);
+            const SkinnedVertex3D& b = bindPtr[i];
+            float m00 = 0.0f, m01 = 0.0f, m02 = 0.0f, m03 = 0.0f;
+            float m10 = 0.0f, m11 = 0.0f, m12 = 0.0f, m13 = 0.0f;
+            float m20 = 0.0f, m21 = 0.0f, m22 = 0.0f, m23 = 0.0f;
 
             for (int w = 0; w < 4; ++w) {
-                float weight = b.weights[w];
+                const float weight = b.weights[w];
                 if (weight > 0.0001f) {
-                    uint16_t jIdx = b.joints[w];
+                    const uint16_t jIdx = b.joints[w];
                     if (jIdx < numSkinMatrices) {
-                        const Mat4& skinM = skinMatrices[jIdx];
-                        skinnedPos = skinnedPos + (skinM.TransformPoint(b.position) * weight);
-                        skinnedNorm = skinnedNorm + (skinM.TransformDirection(b.normal) * weight);
+                        const Mat4& sm = skinMatPtr[jIdx];
+                        m00 += sm.m[0][0] * weight; m01 += sm.m[0][1] * weight; m02 += sm.m[0][2] * weight; m03 += sm.m[0][3] * weight;
+                        m10 += sm.m[1][0] * weight; m11 += sm.m[1][1] * weight; m12 += sm.m[1][2] * weight; m13 += sm.m[1][3] * weight;
+                        m20 += sm.m[2][0] * weight; m21 += sm.m[2][1] * weight; m22 += sm.m[2][2] * weight; m23 += sm.m[2][3] * weight;
                     }
                 }
             }
 
-            activeDeformedMesh->vertices[i].position = Vec3(skinnedPos.x, skinnedPos.y - footOffset, skinnedPos.z);
-            activeDeformedMesh->vertices[i].normal = skinnedNorm.Normalized();
-            activeDeformedMesh->vertices[i].u = b.u;
-            activeDeformedMesh->vertices[i].v = b.v;
-            activeDeformedMesh->vertices[i].color = b.color;
+            const float px = b.position.x, py = b.position.y, pz = b.position.z;
+            const float nx = b.normal.x,   ny = b.normal.y,   nz = b.normal.z;
+
+            Vertex3D& dst = outPtr[i];
+            dst.position.x = m00 * px + m01 * py + m02 * pz + m03;
+            dst.position.y = (m10 * px + m11 * py + m12 * pz + m13) - footOffset;
+            dst.position.z = m20 * px + m21 * py + m22 * pz + m23;
+
+            const float rnx = m00 * nx + m01 * ny + m02 * nz;
+            const float rny = m10 * nx + m11 * ny + m12 * nz;
+            const float rnz = m20 * nx + m21 * ny + m22 * nz;
+            const float lenSq = rnx * rnx + rny * rny + rnz * rnz;
+            const float invLen = (lenSq > 1e-12f) ? (1.0f / std::sqrt(lenSq)) : 1.0f;
+            dst.normal.x = rnx * invLen;
+            dst.normal.y = rny * invLen;
+            dst.normal.z = rnz * invLen;
         }
 
-        // Update bounds & clusters for fast rendering
-        activeDeformedMesh->CalculateBounds();
+        dirtyGPUUpload = true;
+
+        // Calculate bounds only once at initialization (avoids 500k-vertex single-threaded scan per frame)
+        if (needsBoundsInit) {
+            activeDeformedMesh->CalculateBounds();
+        }
     }
 };
 
@@ -564,10 +604,17 @@ public:
                     if (!posAcc) continue;
 
                     // Skip invisible volumetric helper / fog meshes (e.g. fog_88 with alpha=0)
-                    if (prim.material && prim.material->has_pbr_metallic_roughness) {
-                        const auto& pbr = prim.material->pbr_metallic_roughness;
-                        if (pbr.base_color_factor[3] < 0.05f && (!pbr.base_color_texture.texture || !pbr.base_color_texture.texture->image)) {
-                            continue; // Skip invisible collision or fog mesh
+                    if (prim.material) {
+                        if (prim.material->has_pbr_metallic_roughness) {
+                            const auto& pbr = prim.material->pbr_metallic_roughness;
+                            if (pbr.base_color_factor[3] < 0.05f && (!pbr.base_color_texture.texture || !pbr.base_color_texture.texture->image)) {
+                                continue; // Skip invisible collision or fog mesh
+                            }
+                        } else if (prim.material->has_pbr_specular_glossiness) {
+                            const auto& sg = prim.material->pbr_specular_glossiness;
+                            if (sg.diffuse_factor[3] < 0.05f && (!sg.diffuse_texture.texture || !sg.diffuse_texture.texture->image)) {
+                                continue;
+                            }
                         }
                     }
                     if (node->name && std::string(node->name).find("fog") != std::string::npos) {
@@ -609,6 +656,26 @@ public:
                                     uvScale[1] = pbr.base_color_texture.transform.scale[1];
                                     uvOffset[0] = pbr.base_color_texture.transform.offset[0];
                                     uvOffset[1] = pbr.base_color_texture.transform.offset[1];
+                                }
+                            }
+                        } else if (prim.material->has_pbr_specular_glossiness) {
+                            const auto& sg = prim.material->pbr_specular_glossiness;
+                            sub.albedo = ColorRGB(sg.diffuse_factor[0], sg.diffuse_factor[1], sg.diffuse_factor[2]);
+                            sub.metallic = 0.08f;
+                            sub.roughness = std::max(0.15f, 1.0f - sg.glossiness_factor);
+
+                            if (sg.diffuse_texture.texture && sg.diffuse_texture.texture->image) {
+                                RawTex rt = getTex(sg.diffuse_texture.texture->image);
+                                sub.texWidth = rt.w;
+                                sub.texHeight = rt.h;
+                                sub.texRGBA = rt.rgba;
+
+                                if (sg.diffuse_texture.has_transform) {
+                                    hasUvTransform = true;
+                                    uvScale[0] = sg.diffuse_texture.transform.scale[0];
+                                    uvScale[1] = sg.diffuse_texture.transform.scale[1];
+                                    uvOffset[0] = sg.diffuse_texture.transform.offset[0];
+                                    uvOffset[1] = sg.diffuse_texture.transform.offset[1];
                                 }
                             }
                         }
@@ -766,24 +833,45 @@ public:
                 sub.indexOffset = static_cast<uint32_t>(outInstance.activeDeformedMesh->indices.size());
                 float baseFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
-                if (prim.material && prim.material->has_pbr_metallic_roughness) {
-                    const auto& pbr = prim.material->pbr_metallic_roughness;
-                    if (pbr.base_color_factor[3] < 0.05f && (!pbr.base_color_texture.texture || !pbr.base_color_texture.texture->image)) {
-                        continue; // Skip invisible volume / fog helper
-                    }
-                    baseFactor[0] = pbr.base_color_factor[0];
-                    baseFactor[1] = pbr.base_color_factor[1];
-                    baseFactor[2] = pbr.base_color_factor[2];
-                    baseFactor[3] = pbr.base_color_factor[3];
-                    sub.albedo = ColorRGB(baseFactor[0], baseFactor[1], baseFactor[2]);
-                    sub.metallic = pbr.metallic_factor;
-                    sub.roughness = pbr.roughness_factor;
+                if (prim.material) {
+                    if (prim.material->has_pbr_metallic_roughness) {
+                        const auto& pbr = prim.material->pbr_metallic_roughness;
+                        if (pbr.base_color_factor[3] < 0.05f && (!pbr.base_color_texture.texture || !pbr.base_color_texture.texture->image)) {
+                            continue; // Skip invisible volume / fog helper
+                        }
+                        baseFactor[0] = pbr.base_color_factor[0];
+                        baseFactor[1] = pbr.base_color_factor[1];
+                        baseFactor[2] = pbr.base_color_factor[2];
+                        baseFactor[3] = pbr.base_color_factor[3];
+                        sub.albedo = ColorRGB(baseFactor[0], baseFactor[1], baseFactor[2]);
+                        sub.metallic = pbr.metallic_factor;
+                        sub.roughness = pbr.roughness_factor;
 
-                    if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
-                        RawTex rt = getTex(pbr.base_color_texture.texture->image);
-                        sub.texWidth = rt.w;
-                        sub.texHeight = rt.h;
-                        sub.texRGBA = rt.rgba;
+                        if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
+                            RawTex rt = getTex(pbr.base_color_texture.texture->image);
+                            sub.texWidth = rt.w;
+                            sub.texHeight = rt.h;
+                            sub.texRGBA = rt.rgba;
+                        }
+                    } else if (prim.material->has_pbr_specular_glossiness) {
+                        const auto& sg = prim.material->pbr_specular_glossiness;
+                        if (sg.diffuse_factor[3] < 0.05f && (!sg.diffuse_texture.texture || !sg.diffuse_texture.texture->image)) {
+                            continue;
+                        }
+                        baseFactor[0] = sg.diffuse_factor[0];
+                        baseFactor[1] = sg.diffuse_factor[1];
+                        baseFactor[2] = sg.diffuse_factor[2];
+                        baseFactor[3] = sg.diffuse_factor[3];
+                        sub.albedo = ColorRGB(baseFactor[0], baseFactor[1], baseFactor[2]);
+                        sub.metallic = 0.08f;
+                        sub.roughness = std::max(0.15f, 1.0f - sg.glossiness_factor);
+
+                        if (sg.diffuse_texture.texture && sg.diffuse_texture.texture->image) {
+                            RawTex rt = getTex(sg.diffuse_texture.texture->image);
+                            sub.texWidth = rt.w;
+                            sub.texHeight = rt.h;
+                            sub.texRGBA = rt.rgba;
+                        }
                     }
                 }
 
@@ -803,6 +891,11 @@ public:
                 }
 
                 if (!posAcc) continue;
+
+                // In skinned models, skip unskinned background/floor/pedestal/plane helper meshes (e.g. Sketchfab studio floor)
+                if (data->skins_count > 0 && !jointAcc) {
+                    continue;
+                }
 
                 size_t startIdx = outInstance.bindVertices.size();
                 outInstance.bindVertices.resize(startIdx + posAcc->count);

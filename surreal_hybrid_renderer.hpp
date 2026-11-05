@@ -75,6 +75,13 @@ public:
     GLint uAlbedoMapLoc;
     GLint uHasTextureLoc;
     GLint uFogColorLoc;
+    GLint uWetnessLoc;
+    GLint uGlowIntensityLoc;
+    GLint uShaderQualityLoc;
+
+    float wetness = 0.85f;
+    float glowIntensity = 1.30f;
+    int shaderQuality = 1; // 0 = Fast (30-60+ FPS), 1 = Balanced, 2 = Ultra
 
     // Sky Dome Uniform Locations
     GLint uSkyInvVPLoc;
@@ -109,6 +116,7 @@ public:
           uTimeLoc(-1), uNumPointLightsLoc(-1),
           uPointLightPosLoc(-1), uPointLightColLoc(-1),
           uPointLightRadiusLoc(-1), uFogColorLoc(-1),
+          uWetnessLoc(-1), uGlowIntensityLoc(-1), uShaderQualityLoc(-1),
           uSkyInvVPLoc(-1), uSkyZenithLoc(-1),
           uSkyHorizonLoc(-1), uSkyGroundLoc(-1),
           uSkySunDirLoc(-1), uSkySunColLoc(-1),
@@ -226,6 +234,15 @@ public:
         if (uTimeLoc != -1) {
             glUniform1f(uTimeLoc, timeSec);
         }
+        if (uWetnessLoc != -1) {
+            glUniform1f(uWetnessLoc, wetness);
+        }
+        if (uGlowIntensityLoc != -1) {
+            glUniform1f(uGlowIntensityLoc, glowIntensity);
+        }
+        if (uShaderQualityLoc != -1) {
+            glUniform1i(uShaderQualityLoc, shaderQuality);
+        }
         if (uNumPointLightsLoc != -1) {
             int numLights = std::min(static_cast<int>(pointLights.size()), 8);
             glUniform1i(uNumPointLightsLoc, numLights);
@@ -238,7 +255,7 @@ public:
                     posArray[i * 3 + 1] = pointLights[i].position.y;
                     posArray[i * 3 + 2] = pointLights[i].position.z;
 
-                    float intens = pointLights[i].intensity > 0.0f ? pointLights[i].intensity : 1.0f;
+                    float intens = (pointLights[i].intensity > 0.0f ? pointLights[i].intensity : 1.0f) * glowIntensity;
                     colArray[i * 3 + 0] = pointLights[i].color.r * intens;
                     colArray[i * 3 + 1] = pointLights[i].color.g * intens;
                     colArray[i * 3 + 2] = pointLights[i].color.b * intens;
@@ -257,7 +274,8 @@ public:
         const Mat4& worldMat,
         const Mat4& vpMat,
         const PBRMaterial& material,
-        bool isDynamic = false)
+        bool isDynamic = false,
+        bool uploadDynamicVBO = true)
     {
         if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || !mesh) return;
 
@@ -300,8 +318,8 @@ public:
 
             meshBuffers[meshKey] = buf;
             it = meshBuffers.find(meshKey);
-        } else if (isDynamic) {
-            // Update vertex buffer for skeletal deformation
+        } else if (isDynamic && uploadDynamicVBO) {
+            // Update vertex buffer only when skeletal deformation occurred this frame
             glBindBuffer(GL_ARRAY_BUFFER, it->second.vbo);
             glBufferSubData(GL_ARRAY_BUFFER, 0, mesh->vertices.size() * sizeof(Vertex3D), mesh->vertices.data());
         }
@@ -420,7 +438,9 @@ public:
     {
         if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || skyProg == 0) return;
 
-        glDisable(GL_DEPTH_TEST);
+        // Hardware Early-Z optimization: only shade background pixels where depth == 1.0
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
         glDepthMask(GL_FALSE);
         glUseProgram(skyProg);
 
@@ -490,7 +510,7 @@ out vec4 vColor;
 
 void main() {
     vFragPos = vec3(uModel * vec4(aPos, 1.0));
-    vNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    vNormal = normalize(mat3(uModel) * aNormal);
     vTexCoord = aTexCoord;
     vColor = aColor;
     gl_Position = uMVP * vec4(aPos, 1.0);
@@ -519,6 +539,9 @@ uniform sampler2D uAlbedoMap;
 uniform int uHasTexture;
 uniform vec3 uFogColor;
 uniform float uTime;
+uniform float uWetness;
+uniform float uGlowIntensity;
+uniform int uShaderQuality;
 
 // Multi-Point Lights (Street lamps, storefront neon, player aura)
 const int MAX_POINT_LIGHTS = 8;
@@ -562,13 +585,15 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 
 void main() {
     float alpha = vColor.a;
-    vec3 baseAlbedo = uAlbedo * vColor.rgb;
+    vec3 baseAlbedo = uAlbedo;
     vec4 texSample = vec4(1.0);
     if (uHasTexture == 1) {
         texSample = texture(uAlbedoMap, vTexCoord);
         if (texSample.a < 0.15) discard; // Alpha cutout for foliage, leaves & grates
         baseAlbedo *= texSample.rgb;
         alpha *= texSample.a;
+    } else {
+        baseAlbedo *= vColor.rgb;
     }
     vec3 albedo = baseAlbedo;
 
@@ -582,15 +607,26 @@ void main() {
     // =========================================================================
     // Detect ground surfaces (flat horizontal surfaces near ground level)
     float isGround = step(abs(vFragPos.y), 0.65) * step(0.70, N.y);
-    float puddleScale = 0.38;
-    float pn1 = sin(vFragPos.x * puddleScale) * cos(vFragPos.z * (puddleScale * 1.28));
-    float pn2 = sin(vFragPos.x * (puddleScale * 2.1) + 1.8) * cos(vFragPos.z * (puddleScale * 1.7) + 2.9);
-    float pn3 = sin(vFragPos.x * (puddleScale * 4.3) + 3.7) * cos(vFragPos.z * (puddleScale * 3.9) + 0.8);
-    float puddleNoise = (pn1 * 0.50 + pn2 * 0.35 + pn3 * 0.15) * 0.5 + 0.5;
 
-    // Organic water puddles with wet gradient fringes
-    float puddle = smoothstep(0.48, 0.68, puddleNoise) * isGround;
-    float wetFringe = smoothstep(0.38, 0.52, puddleNoise) * isGround;
+    // Organic water puddles with wet gradient fringes (evaluated only on ground pixels!)
+    float effWet = clamp(uWetness, 0.0, 1.0);
+    float puddle = 0.0;
+    float wetFringe = 0.0;
+    if (effWet > 0.01 && isGround > 0.0) {
+        float puddleScale = 0.38;
+        if (uShaderQuality == 0) {
+            float pn = (sin(vFragPos.x * puddleScale) * cos(vFragPos.z * (puddleScale * 1.28))) * 0.5 + 0.5;
+            puddle = smoothstep(0.50, 0.68, pn) * effWet;
+            wetFringe = smoothstep(0.40, 0.52, pn) * effWet;
+        } else {
+            float pn1 = sin(vFragPos.x * puddleScale) * cos(vFragPos.z * (puddleScale * 1.28));
+            float pn2 = sin(vFragPos.x * (puddleScale * 2.1) + 1.8) * cos(vFragPos.z * (puddleScale * 1.7) + 2.9);
+            float pn3 = sin(vFragPos.x * (puddleScale * 4.3) + 3.7) * cos(vFragPos.z * (puddleScale * 3.9) + 0.8);
+            float puddleNoise = (pn1 * 0.50 + pn2 * 0.35 + pn3 * 0.15) * 0.5 + 0.5;
+            puddle = smoothstep(0.48, 0.68, puddleNoise) * effWet;
+            wetFringe = smoothstep(0.38, 0.52, puddleNoise) * effWet;
+        }
+    }
 
     // Wet surfaces darken significantly
     albedo = mix(albedo, albedo * 0.35, wetFringe * 0.75 + puddle * 0.25);
@@ -600,7 +636,7 @@ void main() {
 
     // Normal: in puddles, water levels out flat with subtle ripples
     vec3 effN = N;
-    if (puddle > 0.01) {
+    if (puddle > 0.01 && uShaderQuality >= 1) {
         float ripple = (sin(vFragPos.x * 20.0 + uTime * 2.8) + cos(vFragPos.z * 20.0 + uTime * 2.2)) * 0.018 * puddle;
         effN = normalize(mix(N, vec3(ripple, 1.0, -ripple), puddle * 0.88));
     }
@@ -625,25 +661,29 @@ void main() {
     vec3 pointLightAccum = vec3(0.0);
     for (int i = 0; i < uNumPointLights && i < MAX_POINT_LIGHTS; ++i) {
         vec3 pLightDir = uPointLightPos[i] - vFragPos;
-        float pDist = length(pLightDir);
-        if (pDist >= uPointLightRadius[i]) continue;
+        float pDistSq = dot(pLightDir, pLightDir);
+        float rad = uPointLightRadius[i];
+        if (pDistSq >= rad * rad) continue;
 
+        float pDist = sqrt(pDistSq);
         vec3 pL = pLightDir / max(pDist, 0.001);
+        float pNdotL = dot(effN, pL);
+        if (pNdotL <= 0.0) continue; // Early-out for back-facing surfaces
+
         vec3 pH = normalize(V + pL);
 
         // Smooth quadratic attenuation
-        float pNormDist = pDist / uPointLightRadius[i];
+        float pNormDist = pDist / rad;
         float pAtten = clamp(1.0 - pNormDist * pNormDist, 0.0, 1.0);
         pAtten = (pAtten * pAtten) / (1.0 + 0.15 * pDist);
 
-        float pNdotL = max(dot(effN, pL), 0.0);
         float pNDF = DistributionGGX(effN, pH, roughness);
         float pG = GeometrySmith(effN, V, pL, roughness);
         vec3 pF = fresnelSchlick(max(dot(pH, V), 0.0), F0);
 
         vec3 pkS = pF;
         vec3 pkD = (vec3(1.0) - pkS) * (1.0 - uMetallic);
-        vec3 pSpecular = (pNDF * pG * pF) / (4.0 * max(dot(effN, V), 0.0) * pNdotL + 0.0001);
+        vec3 pSpecular = (pNDF * pG * pF) / (4.0 * NdotV * pNdotL + 0.0001);
 
         pointLightAccum += (pkD * albedo / PI + pSpecular) * uPointLightCol[i] * pNdotL * pAtten;
     }
@@ -671,28 +711,30 @@ void main() {
         float moonShimmer = pow(max(dot(R, L), 0.0), 180.0) * 3.5;
         skyReflect += uSunColor * moonShimmer;
 
-        // c) Street lamps & neon reflection beams stretched across wet puddles
-        for (int i = 0; i < uNumPointLights && i < MAX_POINT_LIGHTS; ++i) {
-            vec3 toPl = normalize(uPointLightPos[i] - vFragPos);
-            float distPl = length(uPointLightPos[i] - vFragPos);
-            float attenPl = clamp(1.0 - (distPl / uPointLightRadius[i]), 0.0, 1.0);
-            float lampMirror = pow(max(dot(R, toPl), 0.0), 96.0) * 3.2;
-            skyReflect += uPointLightCol[i] * lampMirror * attenPl;
-        }
+        // c) Street lamps & neon reflection beams (Ultra & Balanced shader modes)
+        if (uShaderQuality >= 1) {
+            for (int i = 0; i < uNumPointLights && i < MAX_POINT_LIGHTS; ++i) {
+                vec3 toPl = normalize(uPointLightPos[i] - vFragPos);
+                float distPl = length(uPointLightPos[i] - vFragPos);
+                float attenPl = clamp(1.0 - (distPl / uPointLightRadius[i]), 0.0, 1.0);
+                float lampMirror = pow(max(dot(R, toPl), 0.0), 96.0) * 3.2;
+                skyReflect += uPointLightCol[i] * lampMirror * attenPl;
+            }
 
-        // d) City skyline & neon horizon glow reflected at glancing angles
-        float horizonGlow = smoothstep(0.0, 0.25, R.y) * smoothstep(0.75, 0.0, R.y);
-        vec3 neonHorizon = vec3(0.12, 0.08, 0.18) * horizonGlow;
-        skyReflect += neonHorizon;
+            // d) City skyline & neon horizon glow reflected at glancing angles
+            float horizonGlow = smoothstep(0.0, 0.25, R.y) * smoothstep(0.75, 0.0, R.y);
+            vec3 neonHorizon = vec3(0.12, 0.08, 0.18) * horizonGlow;
+            skyReflect += neonHorizon;
+        }
 
         puddleReflection = skyReflect * waterFresnel * puddle;
     }
 
     // 6. Emissive Radiant Glow (Windows, Shop signs, Neon billboards, Street lamp bulbs)
-    vec3 emissiveLight = uEmissive;
+    vec3 emissiveLight = uEmissive * uGlowIntensity;
     if (uHasTexture == 1 && length(uEmissive) > 0.01) {
         // Multiplies the colorful storefront / neon texture content
-        emissiveLight = texSample.rgb * uEmissive * 1.6;
+        emissiveLight = texSample.rgb * uEmissive * 1.6 * uGlowIntensity;
     }
 
     vec3 color = ambient + directLight + pointLightAccum + bounceLight + rimLight + puddleReflection + emissiveLight;
@@ -745,6 +787,9 @@ void main() {
         uAlbedoMapLoc = glGetUniformLocation(pbrProg, "uAlbedoMap");
         uHasTextureLoc = glGetUniformLocation(pbrProg, "uHasTexture");
         uFogColorLoc = glGetUniformLocation(pbrProg, "uFogColor");
+        uWetnessLoc = glGetUniformLocation(pbrProg, "uWetness");
+        uGlowIntensityLoc = glGetUniformLocation(pbrProg, "uGlowIntensity");
+        uShaderQualityLoc = glGetUniformLocation(pbrProg, "uShaderQuality");
 
         // 3. Fullscreen Quad Blit Shader
         const char* qVS = R"(
@@ -764,9 +809,7 @@ out vec4 FragColor;
 in vec2 TexCoord;
 uniform sampler2D uTexture;
 void main() {
-    vec4 col = texture(uTexture, TexCoord);
-    if (col.a < 0.01) discard;
-    FragColor = col;
+    FragColor = texture(uTexture, TexCoord);
 }
 )";
 

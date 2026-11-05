@@ -15,9 +15,251 @@
 #include "surreal_editor.hpp"
 #include "surreal_hybrid_renderer.hpp"
 #include "surreal_aion_link.hpp"
+#include "surreal_game_master.hpp"
 #include <iostream>
 #include <vector>
 #include <chrono>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <fstream>
+#include <functional>
+#include <sys/stat.h>
+
+// --- NATIVE LINUX POPUP STATE & IPC ---
+static std::atomic<bool> g_imagePickerRunning(false);
+static std::atomic<bool> g_settingsGuiRunning(false);
+static std::mutex g_imagePathMutex;
+static std::string g_pendingImagePath = "";
+static time_t g_lastSettingsMTime = 0;
+
+static void TriggerNativeImagePicker() {
+    if (g_imagePickerRunning.load()) {
+        std::cout << "[*] Image picker popup is already open!\n";
+        return;
+    }
+    g_imagePickerRunning.store(true);
+    std::thread([]() {
+        const char* cmd = "GTK_A11Y=none zenity --file-selection --modal "
+                          "--title=\"📸 AION Surreal 3D - Select Image for 3D Model\" "
+                          "--file-filter=\"Images (*.png *.jpg *.jpeg *.bmp) | *.png *.jpg *.jpeg *.bmp *.PNG *.JPG *.JPEG *.BMP\" "
+                          "--file-filter=\"All Files | *\" "
+                          "2>/dev/null";
+        FILE* fp = popen(cmd, "r");
+        if (fp) {
+            char buf[1024];
+            std::string res;
+            if (fgets(buf, sizeof(buf), fp)) {
+                res = buf;
+            }
+            int code = pclose(fp);
+            while (!res.empty() && (res.back() == '\n' || res.back() == '\r' || res.back() == ' ')) {
+                res.pop_back();
+            }
+            if (code == 0 && !res.empty()) {
+                std::string genCmd = "DISPLAY=:0 python3 /root/coding/MeinOS/surreal_engine/scripts/surreal_generator_gui.py \"" + res + "\" 2>/dev/null";
+                int ret = system(genCmd.c_str());
+                (void)ret;
+            }
+        }
+        g_imagePickerRunning.store(false);
+    }).detach();
+}
+
+static void TriggerNativeSettingsDialog() {
+    if (g_settingsGuiRunning.load()) {
+        std::cout << "[*] Settings dialog already open\n";
+        return;
+    }
+    g_settingsGuiRunning.store(true);
+    std::thread([]() {
+        const char* scriptPath = "/root/coding/MeinOS/surreal_engine/scripts/surreal_settings_gui.py";
+        std::string cmd = std::string("DISPLAY=:0 python3 ") + scriptPath + " 2>/dev/null";
+        int ret = system(cmd.c_str());
+        (void)ret;
+        g_settingsGuiRunning.store(false);
+    }).detach();
+}
+
+static void SyncRuntimeSettings(
+    Surreal::SurrealHybridRenderer& hybridRenderer,
+    Surreal::SurrealEngine& engine,
+    int& currentSkyProfile,
+    const std::function<void(int)>& applySkyProfile,
+    bool& shadowsEnabled,
+    float& shadowOpacity,
+    float& sunIntensityMult,
+    float& ambientIntensityMult,
+    int& pointLightLimit,
+    float currentFps,
+    Surreal::SurrealEditor& editor)
+{
+    const char* path = "/tmp/surreal_runtime_settings.json";
+    struct stat st;
+    static int frameCounter = 0;
+    frameCounter++;
+
+    auto writeSettings = [&](const std::string& action = "") {
+        FILE* fp = fopen(path, "w");
+        if (fp) {
+            float fovDeg = engine.cameraFov * (180.0f / (float)M_PI);
+            std::string jsonStr = "{\n"
+                "  \"backend\": \"" + hybridRenderer.GetBackendName() + "\",\n"
+                "  \"sky_profile\": " + std::to_string(currentSkyProfile) + ",\n"
+                "  \"shader_quality\": " + std::to_string(hybridRenderer.shaderQuality) + ",\n"
+                "  \"point_light_count\": " + std::to_string(pointLightLimit) + ",\n"
+                "  \"sun_intensity\": " + std::to_string(sunIntensityMult) + ",\n"
+                "  \"ambient_intensity\": " + std::to_string(ambientIntensityMult) + ",\n"
+                "  \"wetness\": " + std::to_string(hybridRenderer.wetness) + ",\n"
+                "  \"glow_intensity\": " + std::to_string(hybridRenderer.glowIntensity) + ",\n"
+                "  \"shadows\": " + std::string(shadowsEnabled ? "true" : "false") + ",\n"
+                "  \"shadow_opacity\": " + std::to_string(shadowOpacity) + ",\n"
+                "  \"fov\": " + std::to_string(fovDeg) + ",\n"
+                "  \"current_fps\": " + std::to_string(currentFps) + ",\n"
+                "  \"action\": \"" + action + "\"\n"
+                "}\n";
+            fputs(jsonStr.c_str(), fp);
+            fclose(fp);
+            struct stat s;
+            stat(path, &s);
+            g_lastSettingsMTime = s.st_mtime;
+        }
+    };
+
+    if (stat(path, &st) != 0) {
+        writeSettings();
+        return;
+    }
+
+    if (st.st_mtime != g_lastSettingsMTime) {
+        g_lastSettingsMTime = st.st_mtime;
+        std::ifstream f(path);
+        if (f.is_open()) {
+            std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            f.close();
+
+            auto getFloat = [&](const std::string& key, float defVal) -> float {
+                size_t pos = content.find("\"" + key + "\"");
+                if (pos == std::string::npos) return defVal;
+                size_t colon = content.find(':', pos);
+                if (colon == std::string::npos) return defVal;
+                try { return std::stof(content.substr(colon + 1)); } catch (...) { return defVal; }
+            };
+            auto getInt = [&](const std::string& key, int defVal) -> int {
+                size_t pos = content.find("\"" + key + "\"");
+                if (pos == std::string::npos) return defVal;
+                size_t colon = content.find(':', pos);
+                if (colon == std::string::npos) return defVal;
+                try { return std::stoi(content.substr(colon + 1)); } catch (...) { return defVal; }
+            };
+            auto getString = [&](const std::string& key, const std::string& defVal) -> std::string {
+                size_t pos = content.find("\"" + key + "\"");
+                if (pos == std::string::npos) return defVal;
+                size_t q1 = content.find('"', content.find(':', pos));
+                if (q1 == std::string::npos) return defVal;
+                size_t q2 = content.find('"', q1 + 1);
+                if (q2 == std::string::npos) return defVal;
+                return content.substr(q1 + 1, q2 - q1 - 1);
+            };
+            auto getBool = [&](const std::string& key, bool defVal) -> bool {
+                size_t pos = content.find("\"" + key + "\"");
+                if (pos == std::string::npos) return defVal;
+                size_t valPos = content.find_first_not_of(" \t:\r\n", pos + key.length() + 2);
+                if (valPos == std::string::npos) return defVal;
+                return content.substr(valPos, 4) == "true";
+            };
+
+            try {
+                std::string newBackend = getString("backend", "GPU_OPENGL");
+                if (newBackend == "CPU_AVX2" && hybridRenderer.backend != Surreal::RenderBackend::CPU_AVX2) {
+                    hybridRenderer.backend = Surreal::RenderBackend::CPU_AVX2;
+                    editor.SetStatus("[⚙] Backend gewechselt: CPU Bare-Metal AVX2", 3.0f);
+                } else if (newBackend == "GPU_OPENGL" && hybridRenderer.backend != Surreal::RenderBackend::GPU_OPENGL) {
+                    hybridRenderer.backend = Surreal::RenderBackend::GPU_OPENGL;
+                    editor.SetStatus("[⚙] Backend gewechselt: GPU Hardware OpenGL 4.6", 3.0f);
+                }
+
+                int newSky = getInt("sky_profile", currentSkyProfile);
+                if (newSky != currentSkyProfile) {
+                    currentSkyProfile = newSky;
+                    applySkyProfile(currentSkyProfile);
+                    editor.SetStatus("[⚙] Himmel & Atmosphaere aktualisiert", 3.0f);
+                }
+
+                hybridRenderer.shaderQuality = getInt("shader_quality", hybridRenderer.shaderQuality);
+                pointLightLimit = getInt("point_light_count", pointLightLimit);
+                sunIntensityMult = getFloat("sun_intensity", sunIntensityMult);
+                ambientIntensityMult = getFloat("ambient_intensity", ambientIntensityMult);
+                hybridRenderer.wetness = getFloat("wetness", hybridRenderer.wetness);
+                hybridRenderer.glowIntensity = getFloat("glow_intensity", hybridRenderer.glowIntensity);
+                shadowOpacity = getFloat("shadow_opacity", shadowOpacity);
+                shadowsEnabled = getBool("shadows", shadowsEnabled);
+
+                float newFovVal = getFloat("fov", 65.0f);
+                float newFovRad = (newFovVal > 3.5f) ? (newFovVal * ((float)M_PI / 180.0f)) : newFovVal;
+                if (std::abs(newFovRad - engine.cameraFov) > 0.01f) {
+                    engine.cameraFov = newFovRad;
+                }
+
+                // Handle Actions & Presets
+                std::string action = getString("action", "");
+                if (action == "auto_balance") {
+                    if (currentFps < 28.0f) {
+                        hybridRenderer.shaderQuality = 0; // Fast
+                        pointLightLimit = 2;
+                        hybridRenderer.wetness = 0.35f;
+                        shadowsEnabled = true;
+                        shadowOpacity = 0.60f;
+                        editor.SetStatus("[🚀 AUTO-BALANCE] Performance-Modus fuer 30-60 FPS", 4.0f);
+                    } else if (currentFps < 45.0f) {
+                        hybridRenderer.shaderQuality = 1; // Balanced
+                        pointLightLimit = 4;
+                        hybridRenderer.wetness = 0.70f;
+                        shadowsEnabled = true;
+                        shadowOpacity = 0.85f;
+                        editor.SetStatus("[🚀 AUTO-BALANCE] Ausgewogen: Optimale 30-60 FPS Balance", 4.0f);
+                    } else {
+                        hybridRenderer.shaderQuality = 1;
+                        pointLightLimit = 6;
+                        hybridRenderer.wetness = 0.85f;
+                        shadowsEnabled = true;
+                        shadowOpacity = 0.90f;
+                        editor.SetStatus("[🚀 AUTO-BALANCE] High Framerate: Visual quality enhanced", 4.0f);
+                    }
+                    writeSettings();
+                } else if (action == "preset_max_fps") {
+                    hybridRenderer.shaderQuality = 0;
+                    pointLightLimit = 1;
+                    hybridRenderer.wetness = 0.20f;
+                    shadowsEnabled = false;
+                    shadowOpacity = 0.40f;
+                    editor.SetStatus("[🏎️ PRESET] Max FPS (60+ FPS Performance)", 3.0f);
+                    writeSettings();
+                } else if (action == "preset_balanced") {
+                    hybridRenderer.shaderQuality = 1;
+                    pointLightLimit = 4;
+                    hybridRenderer.wetness = 0.70f;
+                    shadowsEnabled = true;
+                    shadowOpacity = 0.85f;
+                    editor.SetStatus("[⚖️ PRESET] Ausgewogen (Standard 30-60 FPS)", 3.0f);
+                    writeSettings();
+                } else if (action == "preset_ultra") {
+                    hybridRenderer.shaderQuality = 2;
+                    pointLightLimit = 8;
+                    hybridRenderer.wetness = 1.0f;
+                    hybridRenderer.glowIntensity = 1.50f;
+                    shadowsEnabled = true;
+                    shadowOpacity = 1.0f;
+                    editor.SetStatus("[💎 PRESET] Ultra Cinematic PBR", 3.0f);
+                    writeSettings();
+                }
+
+                applySkyProfile(currentSkyProfile);
+            } catch (...) {
+            }
+        }
+    }
+}
 
 // List of dancing models & avatars available for fast swapping
 static const std::vector<std::pair<std::string, std::string>> g_availableAvatars = {
@@ -63,16 +305,23 @@ static bool SetPlayerAvatar(
 
     character = std::move(newChar);
 
-    // Auto-calculate humanoid scale to normalize to ~1.80m tall
+    // Auto-calculate humanoid scale to normalize to ~1.45m tall (realistic city proportions)
     character.activeDeformedMesh->CalculateBounds();
     float height = character.activeDeformedMesh->worldBounds.max.y - character.activeDeformedMesh->worldBounds.min.y;
     float scaleFactor = 1.0f;
+    float targetH = (actualPath.find("dragon") != std::string::npos) ? 2.40f : 1.45f;
     if (height > 0.0001f) {
-        scaleFactor = 1.80f / height;
+        scaleFactor = targetH / height;
     }
 
     Surreal::TransformComponent& ct = engine.world.transforms[avatarEntity];
     ct.scale = Surreal::Vec3(scaleFactor, scaleFactor, scaleFactor);
+    for (auto& ed : editor.entities) {
+        if (ed.id == avatarEntity) {
+            ed.scale = ct.scale;
+            break;
+        }
+    }
 
     Surreal::MeshRendererComponent& mr = engine.world.meshRenderers[avatarEntity];
     mr.mesh = character.activeDeformedMesh;
@@ -97,6 +346,8 @@ int main(int argc, char* argv[]) {
     bool loadParkour = false;
     std::string requestedAvatar = "";
     std::string photoPath = "";   // --photo <image>: build a coloured 3D model from a picture
+    std::string rigGroupPath = ""; // --rig-group <image>: segment & auto-rig 3D multi-figure photo
+    bool showSkeletonDebug = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--fullscreen") startFullscreen = true;
@@ -106,6 +357,8 @@ int main(int argc, char* argv[]) {
         if (arg == "--parkour") loadParkour = true;
         if (arg == "--photo" && i + 1 < argc) photoPath = argv[++i];
         else if (arg.rfind("--photo=", 0) == 0) photoPath = arg.substr(8);
+        if ((arg == "--rig-group" || arg == "--segment-group") && i + 1 < argc) rigGroupPath = argv[++i];
+        else if (arg.rfind("--rig-group=", 0) == 0) rigGroupPath = arg.substr(12);
         if (arg == "--avatar" && i + 1 < argc) requestedAvatar = argv[++i];
         else if (arg.rfind("--avatar=", 0) == 0) requestedAvatar = arg.substr(9);
         if (arg == "--benchmark-headless") {
@@ -178,6 +431,8 @@ int main(int argc, char* argv[]) {
 
     // Soft Real-Time Planar Contact Shadow Disc Mesh
     auto shadowDiscMesh = Surreal::SurrealTerrainBuilder::CreateShadowDisc(0.45f, 24);
+    bool shadowsEnabled = true;
+    float shadowOpacity = 0.85f;
 
     // 2b. Optional Obstacle Platforms (only when requested or in bare mode)
     std::vector<Surreal::ObstacleBox> obstacles;
@@ -243,6 +498,19 @@ int main(int argc, char* argv[]) {
     // Aion Nexus <-> Evolution Engine link (non-blocking, optional)
     Surreal::AionLink aionLink;
     aionLink.enabled = useAionLink && !headless;
+
+    // Aion Sovereign Game Master System
+    Surreal::SurrealGameMaster gameMaster;
+
+    // Initialize Aion In-Game AI Player Character (Co-Op Partner & Competitor)
+    std::string aionAvatarPath = "assets/models/miku_-_dance_animation.glb";
+    if (!std::filesystem::exists(aionAvatarPath)) {
+        aionAvatarPath = "/root/coding/Surreal-engine-Game-editor/assets/models/miku_-_dance_animation.glb";
+    }
+    if (!std::filesystem::exists(aionAvatarPath)) {
+        aionAvatarPath = modelPath;
+    }
+    gameMaster.InitAionPlayer(engine, editor, aionAvatarPath, Surreal::Vec3(0, 0, 0));
 
     // Register entities in Editor Outliner
     Surreal::EditableEntity floorEd;
@@ -383,10 +651,17 @@ int main(int argc, char* argv[]) {
             editor.entities.push_back(ped);
             std::cout << "[✓] Photo-to-3D: " << photoName << " (" << photoMesh->vertices.size() << " Verts, "
                       << photoMesh->indices.size() / 3 << " Tris)"
-                      << (p3dInfo.plateMode ? " [Platte: kein Hintergrund erkannt]" : "") << "\n";
+                      << (p3dInfo.plateMode ? " [Plate: Solid Relief]" : " [Cutout Model]") << "\n";
         } else {
-            std::cerr << "[-] Photo-to-3D fehlgeschlagen: " << p3dInfo.error << "\n";
+            std::cerr << "[-] Photo-to-3D failed: " << p3dInfo.error << "\n";
         }
+    }
+
+    // Optional Auto-Rig Group Segmentation (via --rig-group <image.png|jpg>)
+    if (!rigGroupPath.empty()) {
+        editor.AutoSegmentGroupIntoFigures(rigGroupPath, engine.world, obstacles);
+        showSkeletonDebug = true;
+        editor.mode = Surreal::EditorMode::EDIT_MODE;
     }
 
     // Apply requested avatar if specified via CLI
@@ -416,7 +691,7 @@ int main(int argc, char* argv[]) {
     playCamera.yaw = 0.0f;
     playCamera.SetTarget(Surreal::Vec3(0, 1.25f, 0));
 
-    if (startInEditor) {
+    if (startInEditor && editor.mode != Surreal::EditorMode::EDIT_MODE) {
         editor.ToggleMode(playCamera.GetPosition(), playCamera.pitch, playCamera.yaw);
     }
 
@@ -475,13 +750,16 @@ int main(int argc, char* argv[]) {
          false}
     };
     int currentSkyProfile = 0; // Default to immersive Cyberpunk Night!
+    float sunIntensityMult = 1.0f;
+    float ambientIntensityMult = 1.0f;
+    int pointLightLimit = 4;
 
     auto applySkyProfile = [&](int idx) {
         const auto& p = skyProfiles[idx % 4];
         engine.world.sunLight.direction = p.sunDir;
         engine.world.sunLight.color = p.sunColor;
-        engine.world.sunLight.intensity = p.sunIntensity;
-        engine.world.ambientLight = p.ambientColor;
+        engine.world.sunLight.intensity = p.sunIntensity * sunIntensityMult;
+        engine.world.ambientLight = p.ambientColor * ambientIntensityMult;
     };
     applySkyProfile(currentSkyProfile);
 
@@ -489,9 +767,9 @@ int main(int argc, char* argv[]) {
     Surreal::Vec3 charPos(0, 0, 0);
     Surreal::Vec3 charVel(0, 0, 0);
     bool isGrounded = true;
-    constexpr float GRAVITY = -14.8f;
-    constexpr float JUMP_VELOCITY = 6.0f;
-    constexpr float MOVE_SPEED = 4.0f;
+    float currentGravity = -14.8f;
+    float currentJumpVelocity = 6.0f;
+    float currentMoveSpeed = 4.0f;
 
     bool keyForward = false, keyBackward = false, keyLeft = false, keyRight = false;
     bool requestJump = false;
@@ -540,6 +818,102 @@ int main(int argc, char* argv[]) {
         editor.Update(dt);
         aionLink.Update(dt, currentFps, engine.lastFrameTimeMs, editor.entities.size(),
                         editor.mode == Surreal::EditorMode::EDIT_MODE, hybridRenderer.GetBackendName());
+
+        // Aion Game Master & In-Game AI Player Companion Loop
+        gameMaster.Update(dt, charPos, charVel, isGrounded, aionLink,
+                          currentGravity, currentJumpVelocity, currentMoveSpeed, applySkyProfile,
+                          engine, obstacles, playCamera.yaw, requestJump);
+
+        // Sync Runtime Settings from Native Linux Settings Popup (/tmp/surreal_runtime_settings.json)
+        SyncRuntimeSettings(hybridRenderer, engine, currentSkyProfile, applySkyProfile,
+                            shadowsEnabled, shadowOpacity, sunIntensityMult, ambientIntensityMult,
+                            pointLightLimit, currentFps, editor);
+
+        // Process high-precision 3D Model Generator requests (/tmp/surreal_generator_request.json)
+        const char* reqPath = "/tmp/surreal_generator_request.json";
+        struct stat reqStat;
+        if (stat(reqPath, &reqStat) == 0) {
+            std::ifstream reqFile(reqPath);
+            if (reqFile.is_open()) {
+                std::string reqContent((std::istreambuf_iterator<char>(reqFile)), std::istreambuf_iterator<char>());
+                reqFile.close();
+                unlink(reqPath); // Consume request immediately
+
+                auto getJsonString = [&](const std::string& key) -> std::string {
+                    size_t pos = reqContent.find("\"" + key + "\"");
+                    if (pos == std::string::npos) return "";
+                    size_t q1 = reqContent.find('"', reqContent.find(':', pos));
+                    if (q1 == std::string::npos) return "";
+                    size_t q2 = reqContent.find('"', q1 + 1);
+                    if (q2 == std::string::npos) return "";
+                    return reqContent.substr(q1 + 1, q2 - q1 - 1);
+                };
+                auto getJsonFloat = [&](const std::string& key, float defVal) -> float {
+                    size_t pos = reqContent.find("\"" + key + "\"");
+                    if (pos == std::string::npos) return defVal;
+                    size_t colon = reqContent.find(':', pos);
+                    if (colon == std::string::npos) return defVal;
+                    try { return std::stof(reqContent.substr(colon + 1)); } catch (...) { return defVal; }
+                };
+                auto getJsonInt = [&](const std::string& key, int defVal) -> int {
+                    size_t pos = reqContent.find("\"" + key + "\"");
+                    if (pos == std::string::npos) return defVal;
+                    size_t colon = reqContent.find(':', pos);
+                    if (colon == std::string::npos) return defVal;
+                    try { return std::stoi(reqContent.substr(colon + 1)); } catch (...) { return defVal; }
+                };
+
+                std::string modelPath = getJsonString("path");
+                int mode = getJsonInt("mode", 1);
+                float depth = getJsonFloat("depth", 0.45f);
+                float relief = getJsonFloat("relief", 0.35f);
+                float height = getJsonFloat("height", 2.20f);
+                bool genBackside = getJsonInt("generate_backside", 1) != 0;
+                bool anatSmooth = getJsonInt("anatomical_smooth", 1) != 0;
+                float bodyVol = getJsonFloat("body_volume", 1.0f);
+                int ironPasses = getJsonInt("ironing_passes", 120);
+
+                if (!modelPath.empty()) {
+                    Surreal::Image3DOptions userOpt;
+                    userOpt.maxRes = 280;
+                    userOpt.mode = mode;
+                    userOpt.depth = depth;
+                    userOpt.relief = relief;
+                    userOpt.heightMeters = height;
+                    userOpt.generateBackside = genBackside;
+                    userOpt.anatomicalSmooth = anatSmooth;
+                    userOpt.bodyVolume = bodyVol;
+                    userOpt.ironingPasses = std::max(20, std::min(300, ironPasses));
+
+                    std::cout << "[*] High-Precision 3D Model Generation requested for: " << modelPath << "\n";
+                    if (editor.LoadModelFromPath(modelPath, userOpt)) {
+                        editor.placementPos = editor.flyCamPos + editor.GetFlyForward() * 3.5f;
+                        editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
+                        editor.mode = Surreal::EditorMode::EDIT_MODE;
+                        editor.SetStatus("[✓] High-precision 3D Model generated! Left-click to place into world.", 5.0f);
+                    }
+                }
+            }
+        }
+
+        // Process any image selected via fallback native Linux file dialog
+        std::string pickedImage;
+        {
+            std::lock_guard<std::mutex> lock(g_imagePathMutex);
+            if (!g_pendingImagePath.empty()) {
+                pickedImage = g_pendingImagePath;
+                g_pendingImagePath.clear();
+            }
+        }
+        if (!pickedImage.empty()) {
+            std::cout << "[*] User selected file from native Linux dialog: " << pickedImage << "\n";
+            if (editor.LoadModelFromPath(pickedImage)) {
+                editor.placementPos = editor.flyCamPos + editor.GetFlyForward() * 3.5f;
+                editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
+                editor.mode = Surreal::EditorMode::EDIT_MODE;
+                editor.SetStatus("[✓] 3D Model generated from image! Left-click to place into world.", 5.0f);
+            }
+        }
 
         camInput.mouseDeltaX = 0;
         camInput.mouseDeltaY = 0;
@@ -603,6 +977,15 @@ int main(int argc, char* argv[]) {
                         editor.SaveLevel("scene_level.json");
                     } else if (sym == SDLK_F7) {
                         editor.LoadLevel("scene_level.json", engine.world, obstacles);
+                    } else if (sym == SDLK_F3) {
+                        TriggerNativeImagePicker();
+                        editor.SetStatus("[📸] Opening image file dialog...", 3.0f);
+                    } else if (sym == SDLK_F4) {
+                        editor.AutoSegmentGroupIntoFigures("/root/Downloads/meovv_nobg.png", engine.world, obstacles);
+                        showSkeletonDebug = true;
+                    } else if (sym == SDLK_F2) {
+                        TriggerNativeSettingsDialog();
+                        editor.SetStatus("[⚙] Opening Graphics & Engine Settings...", 3.0f);
                     }
 
                     // --- PLAY MODE CONTROLS ---
@@ -680,6 +1063,79 @@ int main(int argc, char* argv[]) {
                                 playCamera.pitch = 0.28f;
                                 playCamera.yaw = 0.0f;
                                 break;
+                            case SDLK_t:
+                                gameMaster.TogglePlayerControl(editor, aionLink);
+                                break;
+                            case SDLK_c:
+                                gameMaster.CycleAIMode(editor, aionLink);
+                                break;
+                            case SDLK_g:
+                                gameMaster.showConsole = !gameMaster.showConsole;
+                                if (gameMaster.showConsole) {
+                                    gameMaster.SetCommentary("Aion Game Master Console active. Select trial [1-4] or [0] to stop.", false, aionLink);
+                                }
+                                break;
+                            case SDLK_1:
+                                if (gameMaster.showConsole) {
+                                    gameMaster.StartTrial(Surreal::GMTrialType::PARKOUR_SPRINT, currentGravity, currentJumpVelocity, currentMoveSpeed, applySkyProfile, aionLink);
+                                }
+                                break;
+                            case SDLK_2:
+                                if (gameMaster.showConsole) {
+                                    gameMaster.StartTrial(Surreal::GMTrialType::QUANTUM_CORE_HUNT, currentGravity, currentJumpVelocity, currentMoveSpeed, applySkyProfile, aionLink);
+                                }
+                                break;
+                            case SDLK_3:
+                                if (gameMaster.showConsole) {
+                                    gameMaster.StartTrial(Surreal::GMTrialType::LUNAR_FLIGHT, currentGravity, currentJumpVelocity, currentMoveSpeed, applySkyProfile, aionLink);
+                                }
+                                break;
+                            case SDLK_4:
+                                if (gameMaster.showConsole) {
+                                    gameMaster.StartTrial(Surreal::GMTrialType::CYBER_STORM, currentGravity, currentJumpVelocity, currentMoveSpeed, applySkyProfile, aionLink);
+                                }
+                                break;
+                            case SDLK_0:
+                                if (gameMaster.showConsole) {
+                                    gameMaster.StopTrial(currentGravity, currentJumpVelocity, currentMoveSpeed, aionLink);
+                                }
+                                break;
+                            case SDLK_PLUS:
+                            case SDLK_KP_PLUS:
+                            case SDLK_EQUALS:
+                            case SDLK_RIGHTBRACKET:
+                            case SDLK_ASTERISK: {
+                                Surreal::TransformComponent& act = engine.world.transforms[avatarEntity];
+                                act.scale = act.scale * 1.10f;
+                                act.scale.x = std::min(10.0f, act.scale.x);
+                                act.scale.y = std::min(10.0f, act.scale.y);
+                                act.scale.z = std::min(10.0f, act.scale.z);
+                                for (auto& ed : editor.entities) {
+                                    if (ed.id == avatarEntity) { ed.scale = act.scale; break; }
+                                }
+                                char sBuf[96];
+                                std::snprintf(sBuf, sizeof(sBuf), "[✓] Avatar Size: %.2fx (Scale: %.3f)", act.scale.y, act.scale.y);
+                                editor.SetStatus(sBuf, 2.0f);
+                                break;
+                            }
+                            case SDLK_MINUS:
+                            case SDLK_KP_MINUS:
+                            case SDLK_SLASH:
+                            case SDLK_UNDERSCORE:
+                            case SDLK_LEFTBRACKET: {
+                                Surreal::TransformComponent& act = engine.world.transforms[avatarEntity];
+                                act.scale = act.scale * 0.90f;
+                                act.scale.x = std::max(0.01f, act.scale.x);
+                                act.scale.y = std::max(0.01f, act.scale.y);
+                                act.scale.z = std::max(0.01f, act.scale.z);
+                                for (auto& ed : editor.entities) {
+                                    if (ed.id == avatarEntity) { ed.scale = act.scale; break; }
+                                }
+                                char sBuf[96];
+                                std::snprintf(sBuf, sizeof(sBuf), "[✓] Avatar Size: %.2fx (Scale: %.3f)", act.scale.y, act.scale.y);
+                                editor.SetStatus(sBuf, 2.0f);
+                                break;
+                            }
                         }
                     }
                     // --- WORLD EDITOR MODE CONTROLS ---
@@ -749,11 +1205,18 @@ int main(int argc, char* argv[]) {
                                     editor.CycleSelectedColor(engine.world, obstacles);
                                     break;
                                 case SDLK_PLUS:
+                                case SDLK_KP_PLUS:
                                 case SDLK_EQUALS:
-                                    editor.placementScale = editor.placementScale * 1.15f;
+                                case SDLK_RIGHTBRACKET:
+                                case SDLK_ASTERISK:
+                                    editor.placementScale = editor.placementScale * 1.10f;
                                     break;
                                 case SDLK_MINUS:
-                                    editor.placementScale = editor.placementScale * 0.85f;
+                                case SDLK_KP_MINUS:
+                                case SDLK_SLASH:
+                                case SDLK_UNDERSCORE:
+                                case SDLK_LEFTBRACKET:
+                                    editor.placementScale = editor.placementScale * 0.90f;
                                     break;
                                 case SDLK_i:
                                 case SDLK_UP:
@@ -809,9 +1272,22 @@ int main(int argc, char* argv[]) {
                                 case SDLK_8: editor.SelectIndex(7); break;
                                 case SDLK_9: editor.SelectIndex(8); break;
 
-                                // Gizmo Movement
-                                case SDLK_i:
+                                // Fly Camera Look / Orbit in Edit Mode
+                                case SDLK_LEFT:
+                                    editor.flyCamYaw -= 0.12f;
+                                    break;
+                                case SDLK_RIGHT:
+                                    editor.flyCamYaw += 0.12f;
+                                    break;
                                 case SDLK_UP:
+                                    editor.flyCamPitch = std::min(1.4f, editor.flyCamPitch + 0.08f);
+                                    break;
+                                case SDLK_DOWN:
+                                    editor.flyCamPitch = std::max(-1.4f, editor.flyCamPitch - 0.08f);
+                                    break;
+
+                                // Gizmo Movement: [I/K] Z, [J/L] X, [U/O] Y
+                                case SDLK_i:
                                     editor.MoveSelected(Surreal::Vec3(0, 0, -0.4f), engine.world, obstacles);
                                     break;
                                 case SDLK_k:
@@ -822,10 +1298,8 @@ int main(int argc, char* argv[]) {
                                     }
                                     break;
                                 case SDLK_j:
-                                case SDLK_LEFT:
                                     editor.MoveSelected(Surreal::Vec3(-0.4f, 0, 0), engine.world, obstacles);
                                     break;
-                                case SDLK_RIGHT:
                                 case SDLK_SEMICOLON:
                                     editor.MoveSelected(Surreal::Vec3(0.4f, 0, 0), engine.world, obstacles);
                                     break;
@@ -838,11 +1312,18 @@ int main(int argc, char* argv[]) {
 
                                 // Scaling
                                 case SDLK_PLUS:
+                                case SDLK_KP_PLUS:
                                 case SDLK_EQUALS:
-                                    editor.ScaleSelected(1.15f, engine.world, obstacles);
+                                case SDLK_RIGHTBRACKET:
+                                case SDLK_ASTERISK:
+                                    editor.ScaleSelected(1.10f, engine.world, obstacles);
                                     break;
                                 case SDLK_MINUS:
-                                    editor.ScaleSelected(0.85f, engine.world, obstacles);
+                                case SDLK_KP_MINUS:
+                                case SDLK_SLASH:
+                                case SDLK_UNDERSCORE:
+                                case SDLK_LEFTBRACKET:
+                                    editor.ScaleSelected(0.90f, engine.world, obstacles);
                                     break;
 
                                 // Material & Color
@@ -851,6 +1332,28 @@ int main(int argc, char* argv[]) {
                                     break;
                                 case SDLK_m:
                                     editor.CycleSelectedPBR(engine.world);
+                                    break;
+
+                                // Rotation [R] / [T]
+                                case SDLK_r:
+                                    editor.RotateSelected(0.2618f, engine.world);
+                                    break;
+                                case SDLK_t:
+                                    editor.RotateSelected(-0.2618f, engine.world);
+                                    break;
+
+                                // Focus Camera on Selected Figure [F]
+                                case SDLK_f:
+                                    editor.FocusOnSelected();
+                                    break;
+
+                                // Animation Cycle [V] & Skeleton Bones [H]
+                                case SDLK_v:
+                                    editor.CycleSelectedAnimation();
+                                    break;
+                                case SDLK_h:
+                                    showSkeletonDebug = !showSkeletonDebug;
+                                    editor.SetStatus(showSkeletonDebug ? "[🦴 SKELETON] Template Rig Bones ON [H]" : "[🦴 SKELETON] Bones OFF [H]", 2.5f);
                                     break;
 
                                 // Duplicate & Delete
@@ -871,6 +1374,33 @@ int main(int argc, char* argv[]) {
                 } else if (ev.type == SDL_MOUSEBUTTONDOWN) {
                     if (benchResults.isCompleted) {
                         benchResults.isCompleted = false;
+                    }
+                    if (ev.button.button == SDL_BUTTON_LEFT) {
+                        bool clickedTopBar = false;
+                        for (auto& btn : editor.topButtons) {
+                            if (btn.Contains(ev.button.x, ev.button.y)) {
+                                btn.isPressed = true;
+                                clickedTopBar = true;
+                                if (btn.id == "photo_3d") {
+                                    TriggerNativeImagePicker();
+                                    editor.SetStatus("[📸] Opening image file dialog...", 3.0f);
+                                } else if (btn.id == "rig_group") {
+                                    editor.AutoSegmentGroupIntoFigures("/root/Downloads/meovv_nobg.png", engine.world, obstacles);
+                                    showSkeletonDebug = true;
+                                } else if (btn.id == "settings") {
+                                    TriggerNativeSettingsDialog();
+                                    editor.SetStatus("[⚙] Opening Graphics & Engine Settings...", 3.0f);
+                                } else if (btn.id == "catalog") {
+                                    editor.ToggleModelCatalog();
+                                } else if (btn.id == "save") {
+                                    editor.SaveLevel("scene_level.json");
+                                } else if (btn.id == "load") {
+                                    editor.LoadLevel("scene_level.json", engine.world, obstacles);
+                                }
+                                break;
+                            }
+                        }
+                        if (clickedTopBar) continue;
                     }
                     if (editor.mode == Surreal::EditorMode::EDIT_MODE) {
                         if (editor.showModelCatalog && ev.button.button == SDL_BUTTON_LEFT) {
@@ -913,9 +1443,15 @@ int main(int argc, char* argv[]) {
                         if (ev.button.button == SDL_BUTTON_RIGHT) camInput.isRightMouseDown = true;
                     }
                 } else if (ev.type == SDL_MOUSEBUTTONUP) {
+                    for (auto& btn : editor.topButtons) {
+                        btn.isPressed = false;
+                    }
                     if (ev.button.button == SDL_BUTTON_LEFT) camInput.isLeftMouseDown = false;
                     if (ev.button.button == SDL_BUTTON_RIGHT) camInput.isRightMouseDown = false;
                 } else if (ev.type == SDL_MOUSEMOTION) {
+                    for (auto& btn : editor.topButtons) {
+                        btn.isHovered = btn.Contains(ev.motion.x, ev.motion.y);
+                    }
                     if (editor.mode == Surreal::EditorMode::EDIT_MODE && editor.isPlacingModel) {
                         Surreal::Vec3 hit = Surreal::SurrealEditor::ScreenToGround(
                             ev.motion.x, ev.motion.y, winW, winH,
@@ -928,9 +1464,16 @@ int main(int argc, char* argv[]) {
                         camInput.mouseDeltaY += static_cast<float>(-ev.motion.yrel);
                     }
                 } else if (ev.type == SDL_MOUSEWHEEL) {
-                    if (editor.mode == Surreal::EditorMode::EDIT_MODE && editor.isPlacingModel) {
-                        if (ev.wheel.y > 0) editor.placementScale = editor.placementScale * 1.10f;
-                        else if (ev.wheel.y < 0) editor.placementScale = editor.placementScale * 0.90f;
+                    if (editor.mode == Surreal::EditorMode::EDIT_MODE) {
+                        if (editor.isPlacingModel) {
+                            if (ev.wheel.y > 0) editor.placementScale = editor.placementScale * 1.10f;
+                            else if (ev.wheel.y < 0) editor.placementScale = editor.placementScale * 0.90f;
+                        } else if (SDL_GetModState() & (KMOD_CTRL | KMOD_SHIFT | KMOD_ALT)) {
+                            if (ev.wheel.y > 0) editor.ScaleSelected(1.10f, engine.world, obstacles);
+                            else if (ev.wheel.y < 0) editor.ScaleSelected(0.90f, engine.world, obstacles);
+                        } else {
+                            camInput.scrollDelta += static_cast<float>(ev.wheel.y);
+                        }
                     } else {
                         camInput.scrollDelta += static_cast<float>(ev.wheel.y);
                     }
@@ -972,7 +1515,7 @@ int main(int argc, char* argv[]) {
                 float targetYaw = atan2f(moveDir.x, moveDir.z);
                 charTransform.rotation = Surreal::Quat::FromAxisAngle(Surreal::Vec3(0, 1.0f, 0), targetYaw);
 
-                Surreal::Vec3 nextPos = charPos + (moveDir * (MOVE_SPEED * dt));
+                Surreal::Vec3 nextPos = charPos + (moveDir * (currentMoveSpeed * dt));
                 constexpr float CHAR_RADIUS = 0.22f;
 
                 for (const auto& obs : obstacles) {
@@ -995,14 +1538,14 @@ int main(int argc, char* argv[]) {
 
             if (requestJump) {
                 if (isGrounded) {
-                    charVel.y = JUMP_VELOCITY;
+                    charVel.y = currentJumpVelocity;
                     isGrounded = false;
                 }
                 requestJump = false;
             }
 
             if (!isGrounded) {
-                charVel.y += GRAVITY * dt;
+                charVel.y += currentGravity * dt;
                 charPos.y += charVel.y * dt;
             }
 
@@ -1027,8 +1570,11 @@ int main(int argc, char* argv[]) {
 
             charTransform.position = charPos;
 
-            // Update Spring-Arm Play Camera
-            playCamera.SetTarget(charPos + Surreal::Vec3(0, 1.25f, 0));
+            // Update Spring-Arm Play Camera (Tracks either Prime Avatar or Aion depending on control swap)
+            Surreal::Vec3 activeCamTarget = gameMaster.isPlayerControllingAion
+                                            ? (gameMaster.aionAgent.pos + Surreal::Vec3(0, 1.25f, 0))
+                                            : (charPos + Surreal::Vec3(0, 1.25f, 0));
+            playCamera.SetTarget(activeCamTarget);
 
             float floorUnderCam = 0.35f;
             Surreal::Vec3 currentCamPos = playCamera.GetPosition();
@@ -1065,11 +1611,15 @@ int main(int argc, char* argv[]) {
             engine.cameraUp = Surreal::Vec3(0, 1.0f, 0);
         }
 
-        // --- 2. Skeletal Animation Update ---
+        // Precompute camera View-Projection & Frustum for Topological Pruning
+        Surreal::Mat4 vpMat = engine.GetProjectionMatrix() * engine.GetViewMatrix();
+        Surreal::Frustum camFrustum = Surreal::Frustum::FromViewProjection(vpMat);
+
+        // --- 2. Skeletal Animation Update (with Gen 4833/4834 Topological Frustum & Cadence Pruning) ---
         if (!animPaused || isBenchmarkRunning) {
             auto tSkinStart = std::chrono::high_resolution_clock::now();
             character.Update(dt);
-            editor.UpdateAnimations(dt);
+            editor.UpdateAnimations(dt, &engine.world, &camFrustum, &engine.cameraPos);
             auto tSkinEnd = std::chrono::high_resolution_clock::now();
             lastSkinningMs = std::chrono::duration<float, std::milli>(tSkinEnd - tSkinStart).count();
         }
@@ -1106,43 +1656,83 @@ int main(int argc, char* argv[]) {
                 activePointLights.push_back({Surreal::Vec3(4.2f, 6.2f, -3.8f), Surreal::ColorRGB(2.6f, 1.4f, 3.5f), 1.0f, 25.0f}); // Church cross neon
                 // Avatar personal flashlight / aura fill
                 activePointLights.push_back({Surreal::Vec3(charPos.x, charPos.y + 1.6f, charPos.z + 0.3f), Surreal::ColorRGB(1.4f, 1.6f, 2.0f), 1.0f, 9.5f});
+
+                if ((int)activePointLights.size() > pointLightLimit) {
+                    activePointLights.resize(std::max(0, pointLightLimit));
+                }
             }
 
             hybridRenderer.SetGlobalUniforms(
                 engine.world.sunLight.direction,
-                engine.world.sunLight.color * engine.world.sunLight.intensity,
-                engine.world.ambientLight,
+                engine.world.sunLight.color * (engine.world.sunLight.intensity * sunIntensityMult),
+                engine.world.ambientLight * ambientIntensityMult,
                 engine.cameraPos,
                 curSky.horizonColor,
                 totalAppTime,
                 activePointLights
             );
 
-            Surreal::Mat4 vpMat = engine.GetProjectionMatrix() * engine.GetViewMatrix();
+            engine.renderedMeshlets = 0;
+            engine.culledMeshlets = 0;
 
-            // Render Dynamic Celestial Sky Dome (Deep atmosphere, horizon gradient, sun/moon & stars)
+            // Render all scene entities with Frustum Culling & Dirty VBO Tracking
+            for (auto entityID : engine.world.entities) {
+                auto itMr = engine.world.meshRenderers.find(entityID);
+                auto itTr = engine.world.transforms.find(entityID);
+                if (itMr == engine.world.meshRenderers.end() || itTr == engine.world.transforms.end()) continue;
+                const auto& mesh = itMr->second.mesh;
+                if (!mesh || mesh->vertices.empty()) continue;
+
+                Surreal::Mat4 worldMat = itTr->second.GetWorldMatrix();
+
+                // Topological Frustum Culling (skip off-screen city blocks & NPCs)
+                if (mesh->worldBounds.max.x >= mesh->worldBounds.min.x) {
+                    Surreal::Vec3 localCenter = (mesh->worldBounds.min + mesh->worldBounds.max) * 0.5f;
+                    Surreal::Vec3 localHalf = (mesh->worldBounds.max - mesh->worldBounds.min) * 0.5f;
+                    Surreal::Vec3 worldCenter = worldMat.TransformPoint(localCenter);
+                    float maxScale = std::max({std::abs(itTr->second.scale.x), std::abs(itTr->second.scale.y), std::abs(itTr->second.scale.z)});
+                    float worldRadius = localHalf.Length() * maxScale + 2.0f;
+                    if (!camFrustum.IsSphereVisible(worldCenter, worldRadius)) {
+                        engine.culledMeshlets += std::max<uint32_t>(1u, static_cast<uint32_t>(mesh->meshlets.size()));
+                        continue;
+                    }
+                }
+                engine.renderedMeshlets += std::max<uint32_t>(1u, static_cast<uint32_t>(mesh->meshlets.size()));
+
+                bool isDynamic = false;
+                bool uploadVBO = false;
+                if (entityID == avatarEntity) {
+                    isDynamic = true;
+                    uploadVBO = character.dirtyGPUUpload;
+                    character.dirtyGPUUpload = false;
+                } else {
+                    auto itAnim = editor.animatedEntities.find(entityID);
+                    if (itAnim != editor.animatedEntities.end() && itAnim->second) {
+                        isDynamic = true;
+                        uploadVBO = itAnim->second->dirtyGPUUpload;
+                        itAnim->second->dirtyGPUUpload = false;
+                    }
+                }
+                hybridRenderer.RenderMesh(mesh, worldMat, vpMat, itMr->second.material, isDynamic, uploadVBO);
+            }
+
+            // Render Dynamic Celestial Sky Dome AFTER opaque geometry (Hardware Early-Z GL_LEQUAL culls covered sky pixels!)
             hybridRenderer.RenderSky(
                 vpMat.Inversed(),
                 curSky.zenithColor,
                 curSky.horizonColor,
                 curSky.groundColor,
                 curSky.sunDir,
-                curSky.sunColor * curSky.sunIntensity,
+                curSky.sunColor * (curSky.sunIntensity * sunIntensityMult),
                 curSky.isNight
             );
 
-            // Render all scene entities
-            for (auto entityID : engine.world.entities) {
-                auto itMr = engine.world.meshRenderers.find(entityID);
-                auto itTr = engine.world.transforms.find(entityID);
-                if (itMr == engine.world.meshRenderers.end() || itTr == engine.world.transforms.end()) continue;
-
-                bool isDynamic = (entityID == avatarEntity) || (editor.animatedEntities.count(entityID) > 0);
-                hybridRenderer.RenderMesh(itMr->second.mesh, itTr->second.GetWorldMatrix(), vpMat, itMr->second.material, isDynamic);
-            }
-
             // Real-Time Contact Ground Shadows
-            if (shadowDiscMesh) {
+            if (shadowDiscMesh && shadowsEnabled && shadowOpacity > 0.01f) {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDepthMask(GL_FALSE);
+
                 Surreal::PBRMaterial shadowMat;
                 shadowMat.albedo = Surreal::ColorRGB(0.01f, 0.01f, 0.02f);
                 shadowMat.metallic = 0.0f;
@@ -1150,7 +1740,7 @@ int main(int argc, char* argv[]) {
 
                 // Player Shadow
                 float jumpH = std::max(0.0f, charPos.y);
-                float pScale = std::max(0.35f, 1.0f / (1.0f + jumpH * 0.7f));
+                float pScale = std::max(0.35f, 1.0f / (1.0f + jumpH * 0.7f)) * shadowOpacity;
                 Surreal::Vec3 pOffset = engine.world.sunLight.direction * (0.08f + jumpH * 0.12f);
                 Surreal::Mat4 pShadowMat = Surreal::Mat4::Translation(Surreal::Vec3(charPos.x + pOffset.x, 0.003f, charPos.z + pOffset.z)) *
                                            Surreal::Mat4::Scaling(Surreal::Vec3(pScale, 1.0f, pScale));
@@ -1160,10 +1750,13 @@ int main(int argc, char* argv[]) {
                 for (const auto& ed : editor.entities) {
                     if (ed.isCharacter || editor.animatedEntities.count(ed.id) > 0 || ed.name.find("_3D") != std::string::npos) {
                         Surreal::Mat4 npcShadow = Surreal::Mat4::Translation(Surreal::Vec3(ed.position.x, 0.003f, ed.position.z)) *
-                                                  Surreal::Mat4::Scaling(Surreal::Vec3(1.1f, 1.0f, 1.1f));
+                                                  Surreal::Mat4::Scaling(Surreal::Vec3(1.1f * shadowOpacity, 1.0f, 1.1f * shadowOpacity));
                         hybridRenderer.RenderMesh(shadowDiscMesh, npcShadow, vpMat, shadowMat, false);
                     }
                 }
+
+                glDepthMask(GL_TRUE);
+                glDisable(GL_BLEND);
             }
 
             // Draw Live 3D Placement Model Preview (GPU)
@@ -1177,6 +1770,9 @@ int main(int argc, char* argv[]) {
                 previewMat.roughness = editor.placementRoughness;
                 hybridRenderer.RenderMesh(editor.placementMesh, previewWorld, vpMat, previewMat, false);
             }
+
+            // Render 3D Game Master Beacons & Energy Cores
+            gameMaster.Render3D(hybridRenderer, vpMat, engine.world.sunLight.direction);
 
             // Draw HUD into transparent buffer
             std::fill(hudFramebuffer.begin(), hudFramebuffer.end(), 0x00000000);
@@ -1217,7 +1813,7 @@ int main(int argc, char* argv[]) {
 
                     if (!nearDancer.empty()) {
                         char duetBuf[128];
-                        std::snprintf(duetBuf, sizeof(duetBuf), "[E] Dance Duet mit %s!", nearDancer.c_str());
+                        std::snprintf(duetBuf, sizeof(duetBuf), "[E] Dance Duet with %s!", nearDancer.c_str());
                         int dw = 260, dh = 24;
                         int dx = std::max(10, std::min((int)winW - dw - 10, sx - dw / 2));
                         int dy = std::max(30, std::min((int)winH - dh - 10, sy - 34));
@@ -1234,8 +1830,95 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            // Render Template Humanoid Skeleton ("Muster-Skelett") Debug Overlay
+            if (showSkeletonDebug) {
+                for (const auto& pair : editor.animatedEntities) {
+                    Surreal::EntityID entId = pair.first;
+                    const auto& skel = pair.second;
+                    if (!skel) continue;
+                    auto itTr = engine.world.transforms.find(entId);
+                    if (itTr == engine.world.transforms.end()) continue;
+                    Surreal::Mat4 worldM = itTr->second.GetWorldMatrix();
+
+                    // Precompute screen positions for all joints
+                    std::vector<int> screenX(skel->joints.size(), -1);
+                    std::vector<int> screenY(skel->joints.size(), -1);
+                    std::vector<bool> onScreen(skel->joints.size(), false);
+
+                    for (size_t j = 0; j < skel->joints.size(); ++j) {
+                        const auto& joint = skel->joints[j];
+                        Surreal::Vec3 jointWorld = worldM.TransformPoint(joint.globalMatrix.TransformPoint(Surreal::Vec3(0,0,0)));
+                        int sx = 0, sy = 0;
+                        if (Surreal::SurrealHUD::WorldToScreen(jointWorld, vpMat, winW, winH, sx, sy)) {
+                            screenX[j] = sx;
+                            screenY[j] = sy;
+                            onScreen[j] = true;
+                        }
+                    }
+
+                    auto drawBoneLine = [&](int jA, int jB, uint32_t col) {
+                        if (jA >= 0 && jA < static_cast<int>(skel->joints.size()) &&
+                            jB >= 0 && jB < static_cast<int>(skel->joints.size())) {
+                            if (onScreen[jA] && onScreen[jB]) {
+                                // Draw crisp dual-pixel line for high visibility
+                                Surreal::SurrealHUD::DrawLine(hudFramebuffer.data(), winW, winH, screenX[jA], screenY[jA], screenX[jB], screenY[jB], col);
+                                Surreal::SurrealHUD::DrawLine(hudFramebuffer.data(), winW, winH, screenX[jA] + 1, screenY[jA], screenX[jB] + 1, screenY[jB], col);
+                            }
+                        }
+                    };
+
+                    // Draw anatomical hierarchical bone lines
+                    for (size_t j = 1; j < skel->joints.size(); ++j) {
+                        const auto& joint = skel->joints[j];
+                        // Skip ground Root (0) to Pelvis (1) line to avoid artificial crotch-to-floor tripod line
+                        if (joint.parentIndex > 0) {
+                            drawBoneLine(static_cast<int>(j), joint.parentIndex, 0xFF00FFCC);
+                        }
+                    }
+
+                    // Draw anatomical crossbars:
+                    // 1. Clavicle / Shoulder crossbar: Shoulder_L (6) <-> Shoulder_R (10)
+                    drawBoneLine(6, 10, 0xFF00FFCC);
+                    // 2. Pelvic girdle crossbar: UpLeg_L (14) <-> UpLeg_R (17)
+                    drawBoneLine(14, 17, 0xFF00FFCC);
+
+                    // Draw joint nodes (spheres)
+                    for (size_t j = 0; j < skel->joints.size(); ++j) {
+                        if (!onScreen[j]) continue;
+                        int sx = screenX[j];
+                        int sy = screenY[j];
+
+                        if (j == 0) continue; // Skip ground Root node
+
+                        if (j == 5) {
+                            // Head node: bright gold cranial sphere
+                            Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 4, 0xFFFFDD00);
+                        } else if (j == 1) {
+                            // Pelvis node: core amber center
+                            Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 4, 0xFFFFBB00);
+                        } else if (j == 3 || j == 4) {
+                            // Chest / Neck: golden yellow
+                            Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 3, 0xFFFFEE33);
+                        } else if (j == 6 || j == 10) {
+                            // Shoulders: neon yellow
+                            Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 3, 0xFFFFEE33);
+                        } else if (j == 9 || j == 13) {
+                            // Hands: neon cyan-gold
+                            Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 3, 0xFF55FFFF);
+                        } else if (j == 16 || j == 19) {
+                            // Feet: lime-cyan
+                            Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 3, 0xFF66FF88);
+                        } else {
+                            // General joint nodes
+                            Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 3, 0xFFFFCC00);
+                        }
+                    }
+                }
+            }
+
             editor.RenderEditorHUD(hudFramebuffer.data(), winW, winH, currentFps, engine.lastFrameTimeMs, hybridRenderer.GetBackendName());
             aionLink.RenderHUD(hudFramebuffer.data(), winW, winH);
+            gameMaster.RenderHUD(hudFramebuffer.data(), winW, winH, vpMat);
             hybridRenderer.BlitHUDOverlay(hudFramebuffer.data(), winW, winH);
             hybridRenderer.Present();
 
@@ -1274,6 +1957,65 @@ int main(int argc, char* argv[]) {
             editor.RenderEditorHUD(framebuffer.data(), winW, winH, currentFps, engine.lastFrameTimeMs, hybridRenderer.GetBackendName());
 
             aionLink.RenderHUD(framebuffer.data(), winW, winH);
+            Surreal::Mat4 vpMatCpu = engine.GetProjectionMatrix() * engine.GetViewMatrix();
+
+            if (showSkeletonDebug) {
+                for (const auto& pair : editor.animatedEntities) {
+                    Surreal::EntityID entId = pair.first;
+                    const auto& skel = pair.second;
+                    if (!skel) continue;
+                    auto itTr = engine.world.transforms.find(entId);
+                    if (itTr == engine.world.transforms.end()) continue;
+                    Surreal::Mat4 worldM = itTr->second.GetWorldMatrix();
+
+                    std::vector<int> screenX(skel->joints.size(), -1);
+                    std::vector<int> screenY(skel->joints.size(), -1);
+                    std::vector<bool> onScreen(skel->joints.size(), false);
+
+                    for (size_t j = 0; j < skel->joints.size(); ++j) {
+                        const auto& joint = skel->joints[j];
+                        Surreal::Vec3 jointWorld = worldM.TransformPoint(joint.globalMatrix.TransformPoint(Surreal::Vec3(0,0,0)));
+                        int sx = 0, sy = 0;
+                        if (Surreal::SurrealHUD::WorldToScreen(jointWorld, vpMatCpu, winW, winH, sx, sy)) {
+                            screenX[j] = sx;
+                            screenY[j] = sy;
+                            onScreen[j] = true;
+                        }
+                    }
+
+                    auto drawBoneLine = [&](int jA, int jB, uint32_t col) {
+                        if (jA >= 0 && jA < static_cast<int>(skel->joints.size()) &&
+                            jB >= 0 && jB < static_cast<int>(skel->joints.size())) {
+                            if (onScreen[jA] && onScreen[jB]) {
+                                Surreal::SurrealHUD::DrawLine(framebuffer.data(), winW, winH, screenX[jA], screenY[jA], screenX[jB], screenY[jB], col);
+                                Surreal::SurrealHUD::DrawLine(framebuffer.data(), winW, winH, screenX[jA] + 1, screenY[jA], screenX[jB] + 1, screenY[jB], col);
+                            }
+                        }
+                    };
+
+                    for (size_t j = 1; j < skel->joints.size(); ++j) {
+                        const auto& joint = skel->joints[j];
+                        if (joint.parentIndex > 0) {
+                            drawBoneLine(static_cast<int>(j), joint.parentIndex, 0xFF00FFCC);
+                        }
+                    }
+                    drawBoneLine(6, 10, 0xFF00FFCC);
+                    drawBoneLine(14, 17, 0xFF00FFCC);
+
+                    for (size_t j = 0; j < skel->joints.size(); ++j) {
+                        if (!onScreen[j] || j == 0) continue;
+                        int sx = screenX[j], sy = screenY[j];
+                        if (j == 5) Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 4, 0xFFFFDD00);
+                        else if (j == 1) Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 4, 0xFFFFBB00);
+                        else if (j == 3 || j == 4 || j == 6 || j == 10) Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 3, 0xFFFFEE33);
+                        else if (j == 9 || j == 13) Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 3, 0xFF55FFFF);
+                        else if (j == 16 || j == 19) Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 3, 0xFF66FF88);
+                        else Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 3, 0xFFFFCC00);
+                    }
+                }
+            }
+
+            gameMaster.RenderHUD(framebuffer.data(), winW, winH, vpMatCpu);
             if (!headless && hybridRenderer.isGLInitialized) {
                 hybridRenderer.BlitSoftwareFramebuffer(framebuffer.data(), winW, winH);
                 hybridRenderer.Present();
