@@ -451,7 +451,12 @@ public:
             return emptyFig;
         }
 
-        // Bind High-Res 3D Mesh onto the 20-Joint Master Humanoid Skeleton with smooth anatomical weights
+        // Bind High-Res 3D Mesh onto the 20-Joint Master Humanoid Skeleton with C1-smooth 4-joint anatomical weights
+        auto smooth01 = [](float edge0, float edge1, float x) -> float {
+            float t = std::clamp((x - edge0) / std::max(1e-5f, edge1 - edge0), 0.0f, 1.0f);
+            return t * t * (3.0f - 2.0f * t);
+        };
+
         inst->bindVertices.resize(suitMesh->vertices.size());
         for (size_t v = 0; v < suitMesh->vertices.size(); ++v) {
             const auto& vt = suitMesh->vertices[v];
@@ -462,71 +467,110 @@ public:
             sv.v = vt.v;
             sv.color = vt.color;
 
-            float yNorm = std::max(0.0f, std::min(1.0f, vt.position.y / std::max(0.1f, H)));
+            float yNorm = std::clamp(vt.position.y / std::max(0.1f, H), 0.0f, 1.0f);
             float absX = std::abs(vt.position.x);
             bool isLeft = (vt.position.x < 0.0f);
 
-            uint16_t j0 = 1, j1 = 2;
-            float w0 = 1.0f, w1 = 0.0f;
+            // Smooth transition between lower body (legs) and upper body (pelvis/torso) across yNorm in [0.40, 0.50]
+            float upperBodyFactor = smooth01(0.40f, 0.50f, yNorm);
+            float lowerBodyFactor = 1.0f - upperBodyFactor;
 
-            if (yNorm >= 0.82f) {
-                // Neck (4) -> Head (5)
-                j0 = 4; j1 = 5;
-                w1 = std::min(1.0f, (yNorm - 0.82f) / 0.06f);
-                w0 = 1.0f - w1;
-            } else if (yNorm >= 0.46f) {
-                // Upper body: check if lateral arm region vs central torso
-                float armThreshold = shHalfX * 0.82f;
-                if (absX > armThreshold && yNorm < 0.78f) {
-                    uint16_t jSh   = isLeft ? 6  : 10;
-                    uint16_t jArm  = isLeft ? 7  : 11;
-                    uint16_t jFore = isLeft ? 8  : 12;
-                    uint16_t jHand = isLeft ? 9  : 13;
-                    float armBlend = std::min(1.0f, (absX - armThreshold) / std::max(0.02f, 0.05f * H));
-                    if (yNorm > 0.66f) {
-                        j0 = 3; j1 = jSh; w1 = armBlend; w0 = 1.0f - w1;
-                    } else if (yNorm > 0.54f) {
-                        j0 = jSh; j1 = jArm; w1 = armBlend; w0 = 1.0f - w1;
-                    } else {
-                        j0 = jArm; j1 = (yNorm < 0.49f) ? jHand : jFore; w1 = armBlend; w0 = 1.0f - w1;
-                    }
-                } else if (yNorm < 0.58f) {
-                    j0 = 1; j1 = 2;
-                    w1 = std::max(0.0f, (yNorm - 0.46f) / 0.12f);
-                    w0 = 1.0f - w1;
-                } else if (yNorm < 0.72f) {
-                    j0 = 2; j1 = 3;
-                    w1 = (yNorm - 0.58f) / 0.14f;
-                    w0 = 1.0f - w1;
-                } else {
-                    j0 = 3; j1 = 4;
-                    w1 = (yNorm - 0.72f) / 0.10f;
-                    w0 = 1.0f - w1;
-                }
+            // 1. Torso & Head Spine Chain (Pelvis=1 -> Spine=2 -> Chest=3 -> Neck=4 -> Head=5)
+            uint16_t tJ0 = 1, tJ1 = 2;
+            float tW1 = 0.0f;
+            if (yNorm < 0.58f) {
+                tJ0 = 1; tJ1 = 2;
+                tW1 = smooth01(0.45f, 0.58f, yNorm);
+            } else if (yNorm < 0.72f) {
+                tJ0 = 2; tJ1 = 3;
+                tW1 = smooth01(0.58f, 0.72f, yNorm);
+            } else if (yNorm < 0.82f) {
+                tJ0 = 3; tJ1 = 4;
+                tW1 = smooth01(0.72f, 0.82f, yNorm);
             } else {
-                // Lower body: Left Leg (14,15,16) vs Right Leg (17,18,19)
-                uint16_t jUpLeg = isLeft ? 14 : 17;
-                uint16_t jLeg   = isLeft ? 15 : 18;
-                uint16_t jFoot  = isLeft ? 16 : 19;
-                if (yNorm < 0.08f) {
-                    j0 = jFoot; j1 = jLeg;
-                    w0 = 1.0f - (yNorm / 0.08f) * 0.5f;
-                    w1 = 1.0f - w0;
-                } else if (yNorm < 0.26f) {
-                    j0 = jLeg; j1 = jUpLeg;
-                    w1 = std::max(0.0f, (yNorm - 0.18f) / 0.14f);
-                    w0 = 1.0f - w1;
-                } else {
-                    j0 = jUpLeg; j1 = 1;
-                    w1 = std::max(0.0f, (yNorm - 0.38f) / 0.08f);
-                    w0 = 1.0f - w1;
-                }
+                tJ0 = 4; tJ1 = 5;
+                tW1 = smooth01(0.82f, 0.90f, yNorm);
+            }
+            float tW0 = 1.0f - tW1;
+
+            // 2. Smooth 2D Arm Envelope on Upper Body (blends outer silhouette smoothly into Shoulder/Arm/Forearm)
+            float xArm = smooth01(shHalfX * 0.50f, shHalfX * 1.05f, absX);
+            float yArm = smooth01(0.42f, 0.50f, yNorm) * (1.0f - smooth01(0.75f, 0.83f, yNorm));
+            float armFactor = xArm * yArm * upperBodyFactor;
+
+            uint16_t aJ0 = isLeft ? 6 : 10; // Shoulder
+            uint16_t aJ1 = isLeft ? 7 : 11; // Arm
+            float aW1 = 0.0f;
+            if (yNorm > 0.64f) {
+                aJ0 = isLeft ? 6 : 10;
+                aJ1 = isLeft ? 7 : 11;
+                aW1 = 1.0f - smooth01(0.64f, 0.75f, yNorm);
+            } else if (yNorm > 0.50f) {
+                aJ0 = isLeft ? 7 : 11;
+                aJ1 = isLeft ? 8 : 12; // Forearm
+                aW1 = 1.0f - smooth01(0.50f, 0.64f, yNorm);
+            } else {
+                aJ0 = isLeft ? 8 : 12;
+                aJ1 = isLeft ? 9 : 13; // Hand
+                aW1 = 1.0f - smooth01(0.42f, 0.50f, yNorm);
+            }
+            float aW0 = 1.0f - aW1;
+
+            // 3. Lower Body Leg Chain with Smooth Midline Blend across x = 0 (prevents skirt/jeans split)
+            float rightLegBlend = smooth01(-0.045f * H, +0.045f * H, vt.position.x);
+            float leftLegBlend  = 1.0f - rightLegBlend;
+
+            uint16_t lJ_L = 14, lJ_R = 17;
+            uint16_t lJ2_L = 15, lJ2_R = 18;
+            float legSubW1 = 0.0f;
+            if (yNorm < 0.10f) {
+                lJ_L = 16; lJ_R = 19; // Foot
+                lJ2_L = 15; lJ2_R = 18; // Leg (Shin)
+                legSubW1 = smooth01(0.02f, 0.10f, yNorm);
+            } else if (yNorm < 0.27f) {
+                lJ_L = 15; lJ_R = 18; // Leg (Knee/Shin)
+                lJ2_L = 14; lJ2_R = 17; // UpLeg (Thigh)
+                legSubW1 = smooth01(0.14f, 0.27f, yNorm);
+            } else {
+                lJ_L = 14; lJ_R = 17; // UpLeg (Thigh)
+                lJ2_L = 1;  lJ2_R = 1;  // Pelvis
+                legSubW1 = smooth01(0.32f, 0.45f, yNorm);
+            }
+            float legSubW0 = 1.0f - legSubW1;
+
+            if (upperBodyFactor >= 0.999f) {
+                // Pure Upper Body: 2 Torso joints + 2 Arm joints
+                float torsoScale = 1.0f - armFactor;
+                sv.joints[0] = tJ0; sv.weights[0] = torsoScale * tW0;
+                sv.joints[1] = tJ1; sv.weights[1] = torsoScale * tW1;
+                sv.joints[2] = aJ0; sv.weights[2] = armFactor * aW0;
+                sv.joints[3] = aJ1; sv.weights[3] = armFactor * aW1;
+            } else if (lowerBodyFactor >= 0.999f) {
+                // Pure Lower Body: Left & Right Leg 2-bone blend across midline
+                sv.joints[0] = lJ_L;  sv.weights[0] = leftLegBlend * legSubW0;
+                sv.joints[1] = lJ2_L; sv.weights[1] = leftLegBlend * legSubW1;
+                sv.joints[2] = lJ_R;  sv.weights[2] = rightLegBlend * legSubW0;
+                sv.joints[3] = lJ2_R; sv.weights[3] = rightLegBlend * legSubW1;
+            } else {
+                // Waist/Hip Transition Zone: blend Pelvis/Spine with Left/Right UpLeg + Arm tip
+                uint16_t domLegJ = (leftLegBlend >= rightLegBlend) ? lJ_L : lJ_R;
+                uint16_t secLegJ = (leftLegBlend >= rightLegBlend) ? lJ_R : lJ_L;
+                float domLegW = std::max(leftLegBlend, rightLegBlend);
+                float secLegW = std::min(leftLegBlend, rightLegBlend);
+                sv.joints[0] = tJ0;     sv.weights[0] = upperBodyFactor * tW0 + lowerBodyFactor * legSubW1;
+                sv.joints[1] = tJ1;     sv.weights[1] = upperBodyFactor * tW1;
+                sv.joints[2] = domLegJ; sv.weights[2] = lowerBodyFactor * legSubW0 * domLegW;
+                sv.joints[3] = secLegJ; sv.weights[3] = lowerBodyFactor * legSubW0 * secLegW;
             }
 
-            sv.joints[0] = j0; sv.weights[0] = w0;
-            sv.joints[1] = j1; sv.weights[1] = w1;
-            sv.joints[2] = 0;  sv.weights[2] = 0.0f;
-            sv.joints[3] = 0;  sv.weights[3] = 0.0f;
+            // Normalize weights to sum to 1.0
+            float wSum = sv.weights[0] + sv.weights[1] + sv.weights[2] + sv.weights[3];
+            if (wSum > 1e-5f) {
+                float invW = 1.0f / wSum;
+                for (int k = 0; k < 4; ++k) sv.weights[k] *= invW;
+            } else {
+                sv.joints[0] = 1; sv.weights[0] = 1.0f;
+            }
             inst->bindVertices[v] = sv;
         }
 
@@ -536,9 +580,9 @@ public:
         inst->activeDeformedMesh->submeshes = suitMesh->submeshes;
         inst->activeDeformedMesh->CalculateBounds();
 
-        // Synthesize Procedural K-Pop Dance & Breathing Animation Clips
-        inst->clips = GenerateProceduralClips(figureSeed);
-        inst->PlayClip(0);
+        // Synthesize Procedural K-Pop Dance & Breathing Animation Clips (Start immediately in Clip 0: KPop_MeovvChoreo!)
+        inst->clips = GenerateProceduralClips(figureSeed, H);
+        inst->PlayClip(0, true);
         inst->Update(0.016f);
 
         RiggedFigureEntity fig;
