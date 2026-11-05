@@ -745,10 +745,12 @@ public:
             }
         }
 
-        // Apply gentle bilateral smoothing (4 passes) to blend away front zippers/buttons
-        // while preserving 100% of the authentic garment colors and boundaries
-        for (int pass = 0; pass < 4; ++pass) {
+        // Apply multi-pass bilateral painting (scaled up with opt.ironingPasses, up to 48 passes at 1440)
+        // to blend away front zippers/buttons while preserving 100% of authentic garment colors and boundaries
+        int paintPasses = std::max(12, std::min(48, opt.ironingPasses / 30));
+        for (int pass = 0; pass < paintPasses; ++pass) {
             std::vector<float> nextR = backR, nextG = backG, nextB = backB;
+            #pragma omp parallel for schedule(static)
             for (int y = 1; y + 1 < gh; ++y) {
                 float yRel = static_cast<float>(y) / static_cast<float>(gh);
                 if (yRel <= 0.16f) continue; // Keep hair crisp
@@ -770,9 +772,9 @@ public:
                         wsum += w;
                     }
                     if (wsum > 0.01f) {
-                        nextR[i] = cr + 0.40f * (avgR / wsum - cr);
-                        nextG[i] = cg + 0.40f * (avgG / wsum - cg);
-                        nextB[i] = cb + 0.40f * (avgB / wsum - cb);
+                        nextR[i] = cr + 0.35f * (avgR / wsum - cr);
+                        nextG[i] = cg + 0.35f * (avgG / wsum - cg);
+                        nextB[i] = cb + 0.35f * (avgB / wsum - cb);
                     }
                 }
             }
@@ -793,13 +795,52 @@ public:
         if (bboxW * s > 3.0f * opt.heightMeters) s = 3.0f * opt.heightMeters / bboxW;
         float cx = 0.5f * (minx + maxx);
 
-        // ---- 6. Colors & Vertices: Front real picture, Back 360° synthesized ----
+        // ---- 6. Colors, Unsharp-Mask Clarity Filter & High-Res Dual-Hemisphere GPU Texture Atlas ----
         float avR = 0, avG = 0, avB = 0;
         for (int i = 0; i < N; ++i) if (fg[i]) { avR += R[i]; avG += G[i]; avB += B[i]; }
         avR /= fgCount; avG /= fgCount; avB /= fgCount;
         std::vector<float> bR = BoxBlurMasked(R, fg, gw, gh, 5);
         std::vector<float> bG = BoxBlurMasked(G, fg, gw, gh, 5);
         std::vector<float> bB = BoxBlurMasked(B, fg, gw, gh, 5);
+
+        // Unsharp-Mask micro-contrast enhancement on front photograph (eyes, lips, hair, fabric details)
+        std::vector<float> fineBlurR = BoxBlurMasked(R, fg, gw, gh, 1);
+        std::vector<float> fineBlurG = BoxBlurMasked(G, fg, gw, gh, 1);
+        std::vector<float> fineBlurB = BoxBlurMasked(B, fg, gw, gh, 1);
+        for (int i = 0; i < N; ++i) {
+            if (!fg[i]) continue;
+            R[i] = std::max(0.0f, std::min(255.0f, R[i] + 0.42f * (R[i] - fineBlurR[i])));
+            G[i] = std::max(0.0f, std::min(255.0f, G[i] + 0.42f * (G[i] - fineBlurG[i])));
+            B[i] = std::max(0.0f, std::min(255.0f, B[i] + 0.42f * (B[i] - fineBlurB[i])));
+        }
+
+        // Build Dual-Hemisphere RGBA GPU Texture Atlas:
+        // Left half [0..gw-1] = Unsharp-Masked Front Photo (U in [0.0, 0.5])
+        // Right half [gw..2*gw-1] = 1,440-Pass Painted 360 Backside (U in [0.5, 1.0])
+        const int atlasW = gw * 2;
+        const int atlasH = gh;
+        std::vector<uint8_t> atlasRGBA(static_cast<size_t>(atlasW) * atlasH * 4, 255);
+        for (int y = 0; y < gh; ++y) {
+            for (int x = 0; x < gw; ++x) {
+                int i = y * gw + x;
+                float rf = R[i], gf = G[i], bf = B[i];
+                float rb = (opt.generateBackside ? backR[i] : bR[i]) * opt.backDarken;
+                float gb = (opt.generateBackside ? backG[i] : bG[i]) * opt.backDarken;
+                float bb = (opt.generateBackside ? backB[i] : bB[i]) * opt.backDarken;
+
+                size_t idxFront = (static_cast<size_t>(y) * atlasW + x) * 4;
+                atlasRGBA[idxFront + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, rf + 0.5f)));
+                atlasRGBA[idxFront + 1] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, gf + 0.5f)));
+                atlasRGBA[idxFront + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, bf + 0.5f)));
+                atlasRGBA[idxFront + 3] = 255;
+
+                size_t idxBack = (static_cast<size_t>(y) * atlasW + (gw + x)) * 4;
+                atlasRGBA[idxBack + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, rb + 0.5f)));
+                atlasRGBA[idxBack + 1] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, gb + 0.5f)));
+                atlasRGBA[idxBack + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, bb + 0.5f)));
+                atlasRGBA[idxBack + 3] = 255;
+            }
+        }
 
         auto HH = [&](const std::vector<float>& f, int x, int y) { return isFg(x, y) ? f[y * gw + x] : 0.0f; };
 
@@ -812,7 +853,9 @@ public:
             if (!fg[i]) continue;
             float px = (x - cx) * s;
             float py = (maxy - y) * s;
-            float u = (x + 0.5f) / gw, v = (y + 0.5f) / gh;
+            float uNorm = (x + 0.5f) / gw, vNorm = (y + 0.5f) / gh;
+            float uFront = 0.5f * uNorm;
+            float uBack  = 0.5f + 0.5f * uNorm;
 
             // Front vertex
             float fx = (HH(zf, x + 1, y) - HH(zf, x - 1, y)) * 0.5f;
@@ -820,7 +863,7 @@ public:
             Vec3 nF = Vec3(-fx, fyw, 1.0f).Normalized();
             Vec4 cF(R[i] / 255.0f, G[i] / 255.0f, B[i] / 255.0f, 1.0f);
             idxF[i] = static_cast<int>(mesh->vertices.size());
-            mesh->vertices.push_back(Vertex3D(Vec3(px, py, zf[i] * s), nF, u, v, cF));
+            mesh->vertices.push_back(Vertex3D(Vec3(px, py, zf[i] * s), nF, uFront, vNorm, cF));
 
             // Backside vertex: 360° Material & Color Synthesis
             float bx = (HH(zb, x + 1, y) - HH(zb, x - 1, y)) * 0.5f;
@@ -839,7 +882,7 @@ public:
             cb = std::max(0.0f, std::min(1.0f, cb));
 
             idxB[i] = static_cast<int>(mesh->vertices.size());
-            mesh->vertices.push_back(Vertex3D(Vec3(px, py, zb[i] * s), nB, 1.0f - u, v, Vec4(cr, cg, cb, 1.0f)));
+            mesh->vertices.push_back(Vertex3D(Vec3(px, py, zb[i] * s), nB, uBack, vNorm, Vec4(cr, cg, cb, 1.0f)));
         }
 
         // ---- 7. Triangles: front quad + back quad + watertight rim walls ----
