@@ -3,7 +3,7 @@
 # ==============================================================================
 
 CXX ?= g++
-CXXFLAGS ?= -O3 -mavx2 -mfma -fopenmp -pthread -std=c++17 -Wall -Wextra -Wno-unused-parameter
+CXXFLAGS ?= -O2 -mavx2 -mfma -fopenmp -pthread -std=c++20 -Wall -Wextra -Wno-unused-parameter
 LDFLAGS ?= -lGL -lSDL2 -ldl -lm -fopenmp
 
 TARGET_STUDIO = surreal-editor
