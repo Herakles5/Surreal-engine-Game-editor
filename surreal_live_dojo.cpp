@@ -387,6 +387,14 @@ int main(int argc, char* argv[]) {
     Surreal::SurrealHybridRenderer hybridRenderer;
 
     if (!headless) {
+        // Automatically enable NVIDIA PRIME Render Offload (Zero-Cable-Swap via Onboard HDMI)
+        // when the GTX 1060 6GB (0000:01:00.0) is bound to the host nvidia driver
+        if (access("/dev/nvidia0", R_OK) == 0 && access("/sys/bus/pci/drivers/nvidia/0000:01:00.0", F_OK) == 0) {
+            setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 0);
+            setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 0);
+            setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
+            setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 0);
+        }
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
             std::cerr << "[-] SDL_Init failed: " << SDL_GetError() << "\n";
             headless = true;
