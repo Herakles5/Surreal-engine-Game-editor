@@ -434,6 +434,16 @@ public:
         Mat4 mvpMat = vpMat * worldMat;
         glUniformMatrix4fv(uMVPLoc, 1, GL_TRUE, &mvpMat.m[0][0]);
         glUniformMatrix4fv(uModelLoc, 1, GL_TRUE, &worldMat.m[0][0]);
+        if (uNormalMatLoc != -1) {
+            // Compute 3x3 inverse-transpose normal matrix once per draw call on CPU (instead of per-vertex on GPU!)
+            Mat4 invM = worldMat.Inversed();
+            float nMat[9] = {
+                invM.m[0][0], invM.m[1][0], invM.m[2][0],
+                invM.m[0][1], invM.m[1][1], invM.m[2][1],
+                invM.m[0][2], invM.m[1][2], invM.m[2][2]
+            };
+            glUniformMatrix3fv(uNormalMatLoc, 1, GL_TRUE, nMat);
+        }
 
         glBindVertexArray(it->second.vao);
 
@@ -513,11 +523,13 @@ public:
         glBindVertexArray(0);
     }
 
-    void BlitHUDOverlay(const uint32_t* hudFb, int w, int h) {
+    void BlitHUDOverlay(const uint32_t* hudFb, int w, int h, bool uploadNewPixels = true) {
         if (!isGLInitialized || !hudFb) return;
 
         glBindTexture(GL_TEXTURE_2D, hudTex);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, hudFb);
+        if (uploadNewPixels) {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, hudFb);
+        }
 
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
@@ -643,6 +655,7 @@ layout (location = 3) in vec4 aColor;
 
 uniform mat4 uMVP;
 uniform mat4 uModel;
+uniform mat3 uNormalMatrix;
 uniform mat4 uLightSpaceMatrix;
 
 out vec3 vFragPos;
@@ -654,8 +667,7 @@ out vec4 vFragPosLightSpace;
 void main() {
     vec4 worldPos = uModel * vec4(aPos, 1.0);
     vFragPos = vec3(worldPos);
-    mat3 normalMat = transpose(inverse(mat3(uModel)));
-    vNormal = normalize(normalMat * aNormal);
+    vNormal = normalize(uNormalMatrix * aNormal);
     vTexCoord = aTexCoord;
     vColor = aColor;
     vFragPosLightSpace = uLightSpaceMatrix * worldPos;
@@ -945,6 +957,7 @@ void main() {
 
         uMVPLoc = glGetUniformLocation(pbrProg, "uMVP");
         uModelLoc = glGetUniformLocation(pbrProg, "uModel");
+        uNormalMatLoc = glGetUniformLocation(pbrProg, "uNormalMatrix");
         uLightSpaceMatrixLoc = glGetUniformLocation(pbrProg, "uLightSpaceMatrix");
         uShadowMapLoc = glGetUniformLocation(pbrProg, "uShadowMap");
         uShadowMapEnabledLoc = glGetUniformLocation(pbrProg, "uShadowMapEnabled");
