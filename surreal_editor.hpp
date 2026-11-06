@@ -1126,11 +1126,11 @@ public:
             }
 
             // Gen 4833/4834 Topological Manifold Pruning: Cull off-screen NPC skeletal deformation
-            if (world && camFrustum && !isMeovvDancer) {
+            if (world && camFrustum) {
                 auto itTr = world->transforms.find(pair.first);
                 if (itTr != world->transforms.end()) {
-                    Vec3 center = itTr->second.position + Vec3(0.0f, 0.9f, 0.0f);
-                    if (!camFrustum->IsSphereVisible(center, 2.4f)) {
+                    Vec3 center = itTr->second.position + Vec3(0.0f, 1.0f, 0.0f);
+                    if (!camFrustum->IsSphereVisible(center, 2.5f)) {
                         // Advance clock without CPU vertex skinning while outside view frustum
                         if (skel->activeClipIndex >= 0 && skel->activeClipIndex < (int)skel->clips.size()) {
                             const float dur = skel->clips[skel->activeClipIndex].duration;
@@ -1140,14 +1140,14 @@ public:
                         }
                         continue;
                     }
-                    if (camPos && (*camPos - itTr->second.position).Length() > 28.0f && ((animFrameCounter + idx) & 3) != 0) {
+                    if (camPos && (*camPos - itTr->second.position).Length() > 22.0f && ((animFrameCounter + idx) & 3) != 0) {
                         continue;
                     }
                 }
             }
 
-            // Always update MEOVV dancers at full 60 FPS cadence; interleave only distant background crowds
-            if (!isMeovvDancer && animatedEntities.size() > 6) {
+            // Interleave multi-character skeletal deformation across odd/even frames (smooth 30 Hz skinning per NPC, 60+ FPS engine)
+            if (animatedEntities.size() >= 3) {
                 if (((animFrameCounter + idx) & 1) == 0) {
                     skel->Update(dt * 2.0f);
                 }

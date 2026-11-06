@@ -813,27 +813,41 @@ public:
             B[i] = std::max(0.0f, std::min(255.0f, B[i] + 0.42f * (B[i] - fineBlurB[i])));
         }
 
-        // Build Dual-Hemisphere RGBA GPU Texture Atlas:
-        // Left half [0..gw-1] = Unsharp-Masked Front Photo (U in [0.0, 0.5])
-        // Right half [gw..2*gw-1] = 1,440-Pass Painted 360 Backside (U in [0.5, 1.0])
-        const int atlasW = gw * 2;
-        const int atlasH = gh;
+        // Build High-Resolution Dual-Hemisphere RGBA GPU Texture Atlas:
+        // Decoupled from 3D mesh grid resolution (gw x gh) so low-poly fast-skinning meshes
+        // still retain full 320p+ photographic sharpness on the GPU!
+        const int atlasScale = std::max(1, 320 / std::max(gw, gh));
+        const int halfAtlasW = gw * atlasScale;
+        const int atlasW = halfAtlasW * 2;
+        const int atlasH = gh * atlasScale;
         std::vector<uint8_t> atlasRGBA(static_cast<size_t>(atlasW) * atlasH * 4, 255);
-        for (int y = 0; y < gh; ++y) {
-            for (int x = 0; x < gw; ++x) {
-                int i = y * gw + x;
+        for (int ay = 0; ay < atlasH; ++ay) {
+            int gy = std::min(gh - 1, ay / atlasScale);
+            int srcY = std::min(h - 1, cropY0 + static_cast<int>((static_cast<int64_t>(ay) * cropH) / atlasH));
+            for (int ax = 0; ax < halfAtlasW; ++ax) {
+                int gx = std::min(gw - 1, ax / atlasScale);
+                int i = gy * gw + gx;
+                int srcX = std::min(w - 1, cropX0 + static_cast<int>((static_cast<int64_t>(ax) * cropW) / halfAtlasW));
+                const uint8_t* sp = rgba + (static_cast<size_t>(srcY) * w + srcX) * 4;
+
                 float rf = R[i], gf = G[i], bf = B[i];
+                if (sp[3] > 140) {
+                    // Blend 75% direct high-res source pixel with 25% decontaminated grid color
+                    rf = 0.75f * sp[0] + 0.25f * R[i];
+                    gf = 0.75f * sp[1] + 0.25f * G[i];
+                    bf = 0.75f * sp[2] + 0.25f * B[i];
+                }
                 float rb = (opt.generateBackside ? backR[i] : bR[i]) * opt.backDarken;
                 float gb = (opt.generateBackside ? backG[i] : bG[i]) * opt.backDarken;
                 float bb = (opt.generateBackside ? backB[i] : bB[i]) * opt.backDarken;
 
-                size_t idxFront = (static_cast<size_t>(y) * atlasW + x) * 4;
+                size_t idxFront = (static_cast<size_t>(ay) * atlasW + ax) * 4;
                 atlasRGBA[idxFront + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, rf + 0.5f)));
                 atlasRGBA[idxFront + 1] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, gf + 0.5f)));
                 atlasRGBA[idxFront + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, bf + 0.5f)));
                 atlasRGBA[idxFront + 3] = 255;
 
-                size_t idxBack = (static_cast<size_t>(y) * atlasW + (gw + x)) * 4;
+                size_t idxBack = (static_cast<size_t>(ay) * atlasW + (halfAtlasW + ax)) * 4;
                 atlasRGBA[idxBack + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, rb + 0.5f)));
                 atlasRGBA[idxBack + 1] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, gb + 0.5f)));
                 atlasRGBA[idxBack + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, bb + 0.5f)));

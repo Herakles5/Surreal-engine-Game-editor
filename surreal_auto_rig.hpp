@@ -402,8 +402,8 @@ public:
         }
 
         Image3DOptions suitOpt;
-        suitOpt.maxRes = 320;
-        suitOpt.ironingPasses = 1440;
+        suitOpt.maxRes = 88;
+        suitOpt.ironingPasses = 160;
         suitOpt.heightMeters = H;
         suitOpt.depth = 0.34f;
         suitOpt.generateBackside = true;
