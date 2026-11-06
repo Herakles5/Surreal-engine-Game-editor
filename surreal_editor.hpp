@@ -439,6 +439,7 @@ public:
     }
 
     void SelectFolderModel(int fileIndex, const std::shared_ptr<SurrealMesh>& avatarMesh = nullptr) {
+        (void)avatarMesh;
         if (fileIndex < 0 || fileIndex >= static_cast<int>(activeCatalogList.size())) return;
         const auto& file = activeCatalogList[fileIndex];
 
@@ -724,6 +725,66 @@ public:
         }
 
         return bestHit;
+    }
+
+    /**
+     * 3D Ray-AABB Entity Picking for Editor Viewport Click Selection
+     */
+    bool PickEntityAtScreenPos(
+        int mouseX, int mouseY, int screenW, int screenH,
+        const Vec3& camPos, const Vec3& camTarget, const Vec3& camUp,
+        float fovRad, const SurrealWorld& world)
+    {
+        if (screenW <= 0 || screenH <= 0 || entities.empty()) return false;
+        // Ignore clicks on right-hand Inspector/Outliner panel in EDIT_MODE
+        if (mode == EditorMode::EDIT_MODE && mouseX >= screenW - 290) return false;
+        // Ignore clicks on top toolbar
+        if (mouseY <= 54) return false;
+
+        float aspect = static_cast<float>(screenW) / static_cast<float>(screenH);
+        float nx = (2.0f * mouseX / screenW) - 1.0f;
+        float ny = 1.0f - (2.0f * mouseY / screenH);
+        float tanHalf = tanf(fovRad * 0.5f);
+
+        Vec3 f = (camTarget - camPos).Normalized();
+        Vec3 r = f.Cross(camUp).Normalized();
+        Vec3 u = r.Cross(f);
+        Vec3 rayDir = (r * (nx * aspect * tanHalf) + u * (ny * tanHalf) + f).Normalized();
+
+        float bestT = 1e9f;
+        int bestIdx = -1;
+
+        for (size_t i = 0; i < entities.size(); ++i) {
+            const auto& ed = entities[i];
+            if (ed.isStaticTerrain || ed.name == "CyberGridFloor" || ed.name == "MetropolisGroundFloor") continue;
+
+            AABB worldBox;
+            auto itMr = world.meshRenderers.find(ed.id);
+            if (itMr != world.meshRenderers.end() && itMr->second.mesh &&
+                itMr->second.mesh->worldBounds.max.x >= itMr->second.mesh->worldBounds.min.x)
+            {
+                const AABB& lb = itMr->second.mesh->worldBounds;
+                Vec3 s(std::abs(ed.scale.x), std::abs(ed.scale.y), std::abs(ed.scale.z));
+                worldBox.min = ed.position + Vec3(lb.min.x * s.x, lb.min.y * s.y, lb.min.z * s.z);
+                worldBox.max = ed.position + Vec3(lb.max.x * s.x, lb.max.y * s.y, lb.max.z * s.z);
+            } else {
+                Vec3 half = Vec3(std::max(0.4f, ed.scale.x * 0.5f), std::max(0.9f, ed.scale.y * 0.5f), std::max(0.4f, ed.scale.z * 0.5f));
+                worldBox.min = ed.position - Vec3(half.x, 0.0f, half.z);
+                worldBox.max = ed.position + Vec3(half.x, half.y * 2.0f, half.z);
+            }
+
+            float tHit = 0.0f;
+            if (worldBox.IntersectRay(camPos, rayDir, tHit) && tHit >= 0.0f && tHit < bestT) {
+                bestT = tHit;
+                bestIdx = static_cast<int>(i);
+            }
+        }
+
+        if (bestIdx >= 0) {
+            SelectIndex(bestIdx);
+            return true;
+        }
+        return false;
     }
 
     void ConfirmPlacement(SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
@@ -1379,6 +1440,7 @@ public:
 
     // Render 3D World Editor HUD & Outliner & Inspector & Spawner Modals
     void RenderEditorHUD(uint32_t* fb, int screenW, int screenH, float currentFps, float frameTimeMs, const std::string& backendName) {
+        (void)frameTimeMs;
         // Top Status Header Panel
         SurrealHUD::DrawPanel(fb, screenW, screenH, 12, 10, screenW - 24, 42, 0x050812, 0.92f);
 

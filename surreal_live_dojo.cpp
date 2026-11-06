@@ -57,7 +57,13 @@ static void TriggerNativeImagePicker() {
                 res.pop_back();
             }
             if (code == 0 && !res.empty()) {
-                std::string genCmd = "DISPLAY=:0 python3 /root/coding/MeinOS/surreal_engine/scripts/surreal_generator_gui.py \"" + res + "\" 2>/dev/null";
+                std::string escaped = "'";
+                for (char c : res) {
+                    if (c == '\'') escaped += "'\\''";
+                    else escaped += c;
+                }
+                escaped += "'";
+                std::string genCmd = "DISPLAY=:0 python3 /root/coding/MeinOS/surreal_engine/scripts/surreal_generator_gui.py " + escaped + " 2>/dev/null";
                 int ret = system(genCmd.c_str());
                 (void)ret;
             }
@@ -1446,7 +1452,14 @@ int main(int argc, char* argv[]) {
                                 editor.CancelPlacement();
                             }
                         } else {
-                            if (ev.button.button == SDL_BUTTON_LEFT) camInput.isLeftMouseDown = true;
+                            if (ev.button.button == SDL_BUTTON_LEFT) {
+                                editor.PickEntityAtScreenPos(
+                                    ev.button.x, ev.button.y, winW, winH,
+                                    engine.cameraPos, engine.cameraTarget, engine.cameraUp,
+                                    engine.cameraFov, engine.world
+                                );
+                                camInput.isLeftMouseDown = true;
+                            }
                             if (ev.button.button == SDL_BUTTON_RIGHT) camInput.isRightMouseDown = true;
                         }
                     } else {
@@ -1653,6 +1666,39 @@ int main(int argc, char* argv[]) {
         if (hybridRenderer.backend == Surreal::RenderBackend::GPU_OPENGL && hybridRenderer.isGLInitialized) {
             // --- GPU HARDWARE OPENGL 4.6 PIPELINE ---
             const auto& curSky = skyProfiles[currentSkyProfile % 4];
+
+            // 1. Directional Shadow Depth Pass (2048x2048 PCF Shadow Map)
+            if (shadowsEnabled && hybridRenderer.shaderQuality >= 1) {
+                hybridRenderer.BeginShadowPass(engine.world.sunLight.direction, charPos);
+                for (auto entityID : engine.world.entities) {
+                    auto itMr = engine.world.meshRenderers.find(entityID);
+                    auto itTr = engine.world.transforms.find(entityID);
+                    if (itMr == engine.world.meshRenderers.end() || itTr == engine.world.transforms.end()) continue;
+                    const auto& mesh = itMr->second.mesh;
+                    if (!mesh || mesh->vertices.empty()) continue;
+                    // Skip flat ground plane in shadow caster pass to avoid self-shadowing acne
+                    if (entityID == floorEntity) continue;
+
+                    Surreal::Mat4 worldMat = itTr->second.GetWorldMatrix();
+                    bool isDyn = (entityID == avatarEntity) || (editor.animatedEntities.find(entityID) != editor.animatedEntities.end());
+                    bool upVBO = false;
+                    if (entityID == avatarEntity) {
+                        upVBO = character.dirtyGPUUpload;
+                        character.dirtyGPUUpload = false;
+                    } else if (isDyn) {
+                        auto itA = editor.animatedEntities.find(entityID);
+                        if (itA != editor.animatedEntities.end() && itA->second) {
+                            upVBO = itA->second->dirtyGPUUpload;
+                            itA->second->dirtyGPUUpload = false;
+                        }
+                    }
+                    hybridRenderer.RenderMeshShadow(mesh, worldMat, isDyn, upVBO);
+                }
+                hybridRenderer.EndShadowPass();
+            } else {
+                hybridRenderer.shadowMapReady = false;
+            }
+
             hybridRenderer.BeginFrame(curSky.horizonColor);
 
             std::vector<Surreal::PointLight> activePointLights;
@@ -2107,8 +2153,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Clean up OpenGL buffers, shaders, and GL context BEFORE destroying the SDL window!
+    hybridRenderer.Cleanup();
+
     if (window) {
         SDL_DestroyWindow(window);
+        window = nullptr;
     }
     if (!headless) SDL_Quit();
 

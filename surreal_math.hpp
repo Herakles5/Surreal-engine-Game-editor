@@ -166,6 +166,17 @@ struct alignas(64) Mat4 {
         return r;
     }
 
+    static Mat4 Orthographic(float left, float right, float bottom, float top, float zNear, float zFar) {
+        Mat4 r = Identity();
+        r.m[0][0] = 2.0f / (right - left);
+        r.m[1][1] = 2.0f / (top - bottom);
+        r.m[2][2] = -2.0f / (zFar - zNear);
+        r.m[0][3] = -(right + left) / (right - left);
+        r.m[1][3] = -(top + bottom) / (top - bottom);
+        r.m[2][3] = -(zFar + zNear) / (zFar - zNear);
+        return r;
+    }
+
     static Mat4 LookAt(const Vec3& eye, const Vec3& target, const Vec3& up) {
         Vec3 f = (target - eye).Normalized();
         Vec3 s = f.Cross(up).Normalized();
@@ -287,6 +298,32 @@ struct AABB {
     inline Vec3 Center() const { return (min + max) * 0.5f; }
     inline Vec3 Extents() const { return (max - min) * 0.5f; }
     inline float BoundingRadius() const { return Extents().Length(); }
+
+    inline bool IntersectRay(const Vec3& rayOrigin, const Vec3& rayDir, float& outTMin) const {
+        float tmin = 0.0f;
+        float tmax = 1e9f;
+
+        const float orig[3] = {rayOrigin.x, rayOrigin.y, rayOrigin.z};
+        const float dir[3]  = {rayDir.x, rayDir.y, rayDir.z};
+        const float bmin[3] = {min.x, min.y, min.z};
+        const float bmax[3] = {max.x, max.y, max.z};
+
+        for (int i = 0; i < 3; ++i) {
+            if (fabsf(dir[i]) < 1e-6f) {
+                if (orig[i] < bmin[i] || orig[i] > bmax[i]) return false;
+            } else {
+                float invD = 1.0f / dir[i];
+                float t0 = (bmin[i] - orig[i]) * invD;
+                float t1 = (bmax[i] - orig[i]) * invD;
+                if (t0 > t1) { float tmp = t0; t0 = t1; t1 = tmp; }
+                if (t0 > tmin) tmin = t0;
+                if (t1 < tmax) tmax = t1;
+                if (tmax < tmin) return false;
+            }
+        }
+        outTMin = tmin;
+        return true;
+    }
 };
 
 // Camera Frustum for 6-Plane Hardware/SIMD Culling

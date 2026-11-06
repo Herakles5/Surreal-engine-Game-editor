@@ -223,31 +223,6 @@ public:
             return (dr * dr + dg * dg + db * db) > 0.018f;
         };
 
-        auto samplePixelColor = [&](float uLocal, float yNorm) -> ColorRGB {
-            // uLocal in [0..1] within [xStart..xEnd], yNorm in [0..1] (0=bottom, 1=top)
-            uLocal = std::max(0.02f, std::min(0.98f, uLocal));
-            yNorm  = std::max(0.01f, std::min(0.99f, yNorm));
-            int py = static_cast<int>((1.0f - yNorm) * (imgH - 1));
-            int px = xStart + static_cast<int>(uLocal * (subW - 1));
-            px = std::max(xStart, std::min(xEnd - 1, px));
-            py = std::max(0, std::min(imgH - 1, py));
-
-            // If pixel happens to fall on transparent background, search horizontally toward center for nearest foreground pixel
-            if (!isForeground(px, py)) {
-                int centerPx = xStart + subW / 2;
-                int step = (centerPx >= px) ? 1 : -1;
-                for (int k = 1; k < subW / 2; ++k) {
-                    int testX = px + k * step;
-                    if (testX >= xStart && testX < xEnd && isForeground(testX, py)) {
-                        px = testX;
-                        break;
-                    }
-                }
-            }
-            const unsigned char* p = rgba + (py * imgW + px) * 4;
-            return ColorRGB(p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f);
-        };
-
         // Find vertical foreground bounds [yTop, yBot] inside [xStart, xEnd]
         int yTop = imgH, yBot = 0;
         for (int y = 0; y < imgH; ++y) {
@@ -336,18 +311,8 @@ public:
             return res;
         };
 
-        auto sampleFittedColor = [&](float uLocal, float yNorm) -> ColorRGB {
-            yNorm = std::max(0.01f, std::min(0.99f, yNorm));
-            int py = yBot - static_cast<int>(yNorm * charPixH);
-            return samplePixelColor(uLocal, 1.0f - static_cast<float>(py) / static_cast<float>(imgH - 1));
-        };
-
-        // Extract Hair Color from top of head (yNorm = 0.94..0.98) for 360-degree back-of-head synthesis
-        ColorRGB hairColor = ( getSliceAt(0.95f).avgColor * 0.6f + getSliceAt(0.92f).leftEdgeColor * 0.4f ) * 0.82f;
-
         // Extract Character Proportions from 2D Silhouette for the Master 20-Joint Skeleton
         float shWidthFrac  = std::max(0.21f, std::min(0.31f, getSliceAt(0.75f).widthFrac));
-        float waistFrac    = std::max(0.13f, std::min(0.23f, getSliceAt(0.60f).widthFrac));
         float hipWidthFrac = std::max(0.17f, std::min(0.27f, getSliceAt(0.48f).widthFrac));
 
         float shHalfX  = shWidthFrac * 0.42f * H;

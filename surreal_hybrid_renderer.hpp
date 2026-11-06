@@ -52,13 +52,26 @@ public:
     GLuint pbrProg;
     GLuint quadProg;
     GLuint skyProg;
+    GLuint shadowProg;
     GLuint quadVAO, quadVBO;
     GLuint screenTex;
     GLuint hudTex;
 
+    // Directional Shadow Map FBO & Depth Texture (2048x2048)
+    GLuint shadowFBO;
+    GLuint shadowDepthTex;
+    static constexpr uint32_t SHADOW_MAP_SIZE = 2048;
+    Mat4 lightSpaceMatrix;
+    bool shadowMapReady = false;
+
     // Uniform Locations
     GLint uMVPLoc;
     GLint uModelLoc;
+    GLint uLightSpaceMatrixLoc;
+    GLint uShadowMapLoc;
+    GLint uShadowMapEnabledLoc;
+    GLint uBeatPulseLoc;
+    GLint uShadowMVPLoc;
     GLint uSunDirLoc;
     GLint uSunColorLoc;
     GLint uAmbientColorLoc;
@@ -81,6 +94,7 @@ public:
 
     float wetness = 0.85f;
     float glowIntensity = 1.30f;
+    float beatPulse = 0.0f;
     int shaderQuality = 1; // 0 = Fast (30-60+ FPS), 1 = Balanced, 2 = Ultra
 
     // Sky Dome Uniform Locations
@@ -105,17 +119,23 @@ public:
           isGLInitialized(false),
           screenWidth(960),
           screenHeight(640),
-          pbrProg(0), quadProg(0), skyProg(0),
+          pbrProg(0), quadProg(0), skyProg(0), shadowProg(0),
           quadVAO(0), quadVBO(0),
           screenTex(0), hudTex(0),
+          shadowFBO(0), shadowDepthTex(0),
+          lightSpaceMatrix(Mat4::Identity()),
           uMVPLoc(-1), uModelLoc(-1),
+          uLightSpaceMatrixLoc(-1), uShadowMapLoc(-1),
+          uShadowMapEnabledLoc(-1), uBeatPulseLoc(-1),
+          uShadowMVPLoc(-1),
           uSunDirLoc(-1), uSunColorLoc(-1),
           uAmbientColorLoc(-1), uCamPosLoc(-1),
           uAlbedoLoc(-1), uMetallicLoc(-1),
           uRoughnessLoc(-1), uEmissiveLoc(-1),
           uTimeLoc(-1), uNumPointLightsLoc(-1),
           uPointLightPosLoc(-1), uPointLightColLoc(-1),
-          uPointLightRadiusLoc(-1), uFogColorLoc(-1),
+          uPointLightRadiusLoc(-1), uAlbedoMapLoc(-1),
+          uHasTextureLoc(-1), uFogColorLoc(-1),
           uWetnessLoc(-1), uGlowIntensityLoc(-1), uShaderQualityLoc(-1),
           uSkyInvVPLoc(-1), uSkyZenithLoc(-1),
           uSkyHorizonLoc(-1), uSkyGroundLoc(-1),
@@ -158,9 +178,59 @@ public:
 
         SetupFullscreenQuad();
         SetupTextures();
+        SetupShadowMap();
 
         isGLInitialized = true;
         return true;
+    }
+
+    /**
+     * Begin Directional Shadow Depth Pass (2048x2048 Depth FBO centered around focusPos)
+     */
+    void BeginShadowPass(const Vec3& sunDir, const Vec3& focusPos) {
+        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || shadowFBO == 0 || shadowProg == 0) return;
+
+        Vec3 lightDir = sunDir.Normalized();
+        if (lightDir.y < 0.12f) lightDir.y = 0.12f;
+        lightDir = lightDir.Normalized();
+
+        Vec3 lightEye = focusPos + lightDir * 24.0f;
+        Mat4 lightView = Mat4::LookAt(lightEye, focusPos, Vec3(0.0f, 1.0f, 0.0f));
+        Mat4 lightProj = Mat4::Orthographic(-18.0f, 18.0f, -18.0f, 18.0f, 1.0f, 52.0f);
+        lightSpaceMatrix = lightProj * lightView;
+
+        glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+        glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glUseProgram(shadowProg);
+    }
+
+    void RenderMeshShadow(
+        const std::shared_ptr<SurrealMesh>& mesh,
+        const Mat4& worldMat,
+        bool isDynamic = false,
+        bool uploadDynamicVBO = false)
+    {
+        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || !mesh || shadowFBO == 0 || shadowProg == 0) return;
+
+        EnsureMeshUploaded(mesh, isDynamic, uploadDynamicVBO);
+        auto it = meshBuffers.find(mesh.get());
+        if (it == meshBuffers.end()) return;
+
+        Mat4 mvp = lightSpaceMatrix * worldMat;
+        glUniformMatrix4fv(uShadowMVPLoc, 1, GL_TRUE, &mvp.m[0][0]);
+        glBindVertexArray(it->second.vao);
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(it->second.indexCount), GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+    }
+
+    void EndShadowPass() {
+        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || shadowFBO == 0) return;
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, screenWidth, screenHeight);
+        shadowMapReady = true;
     }
 
     /**
@@ -234,6 +304,23 @@ public:
         if (uTimeLoc != -1) {
             glUniform1f(uTimeLoc, timeSec);
         }
+        if (uBeatPulseLoc != -1) {
+            // 128 BPM (2.133 Hz) K-Pop rhythmic pulse envelope
+            beatPulse = 0.5f + 0.5f * std::sin(timeSec * 13.404f);
+            glUniform1f(uBeatPulseLoc, beatPulse);
+        }
+        if (uLightSpaceMatrixLoc != -1) {
+            glUniformMatrix4fv(uLightSpaceMatrixLoc, 1, GL_TRUE, &lightSpaceMatrix.m[0][0]);
+        }
+        if (uShadowMapEnabledLoc != -1 && shadowDepthTex != 0 && shadowMapReady) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, shadowDepthTex);
+            glUniform1i(uShadowMapLoc, 1);
+            glUniform1i(uShadowMapEnabledLoc, 1);
+            glActiveTexture(GL_TEXTURE0);
+        } else if (uShadowMapEnabledLoc != -1) {
+            glUniform1i(uShadowMapEnabledLoc, 0);
+        }
         if (uWetnessLoc != -1) {
             glUniform1f(uWetnessLoc, wetness);
         }
@@ -269,16 +356,12 @@ public:
         }
     }
 
-    void RenderMesh(
+    void EnsureMeshUploaded(
         const std::shared_ptr<SurrealMesh>& mesh,
-        const Mat4& worldMat,
-        const Mat4& vpMat,
-        const PBRMaterial& material,
         bool isDynamic = false,
         bool uploadDynamicVBO = true)
     {
-        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || !mesh) return;
-
+        if (!mesh) return;
         const SurrealMesh* meshKey = mesh.get();
         auto it = meshBuffers.find(meshKey);
 
@@ -317,12 +400,33 @@ public:
             glEnableVertexAttribArray(3);
 
             meshBuffers[meshKey] = buf;
-            it = meshBuffers.find(meshKey);
         } else if (isDynamic && uploadDynamicVBO) {
-            // Update vertex buffer only when skeletal deformation occurred this frame
             glBindBuffer(GL_ARRAY_BUFFER, it->second.vbo);
-            glBufferSubData(GL_ARRAY_BUFFER, 0, mesh->vertices.size() * sizeof(Vertex3D), mesh->vertices.data());
+            if (it->second.vertexCount == mesh->vertices.size() && it->second.indexCount == mesh->indices.size()) {
+                glBufferSubData(GL_ARRAY_BUFFER, 0, mesh->vertices.size() * sizeof(Vertex3D), mesh->vertices.data());
+            } else {
+                it->second.vertexCount = mesh->vertices.size();
+                it->second.indexCount = mesh->indices.size();
+                glBufferData(GL_ARRAY_BUFFER, mesh->vertices.size() * sizeof(Vertex3D), mesh->vertices.data(), GL_DYNAMIC_DRAW);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, it->second.ebo);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh->indices.size() * sizeof(uint32_t), mesh->indices.data(), GL_STATIC_DRAW);
+            }
         }
+    }
+
+    void RenderMesh(
+        const std::shared_ptr<SurrealMesh>& mesh,
+        const Mat4& worldMat,
+        const Mat4& vpMat,
+        const PBRMaterial& material,
+        bool isDynamic = false,
+        bool uploadDynamicVBO = true)
+    {
+        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || !mesh) return;
+
+        EnsureMeshUploaded(mesh, isDynamic, uploadDynamicVBO);
+        auto it = meshBuffers.find(mesh.get());
+        if (it == meshBuffers.end()) return;
 
         glUseProgram(pbrProg);
 
@@ -471,6 +575,8 @@ public:
     }
 
     void Cleanup() {
+        if (!isGLInitialized && !glContext) return;
+
         for (auto& pair : meshBuffers) {
             glDeleteBuffers(1, &pair.second.vbo);
             glDeleteBuffers(1, &pair.second.ebo);
@@ -478,24 +584,55 @@ public:
         }
         meshBuffers.clear();
 
-        if (screenTex) glDeleteTextures(1, &screenTex);
-        if (hudTex) glDeleteTextures(1, &hudTex);
-        if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
-        if (quadVBO) glDeleteBuffers(1, &quadVBO);
-        if (pbrProg) glDeleteProgram(pbrProg);
-        if (quadProg) glDeleteProgram(quadProg);
-        if (skyProg) glDeleteProgram(skyProg);
+        if (screenTex) { glDeleteTextures(1, &screenTex); screenTex = 0; }
+        if (hudTex) { glDeleteTextures(1, &hudTex); hudTex = 0; }
+        if (shadowDepthTex) { glDeleteTextures(1, &shadowDepthTex); shadowDepthTex = 0; }
+        if (shadowFBO) { glDeleteFramebuffers(1, &shadowFBO); shadowFBO = 0; }
+        if (quadVAO) { glDeleteVertexArrays(1, &quadVAO); quadVAO = 0; }
+        if (quadVBO) { glDeleteBuffers(1, &quadVBO); quadVBO = 0; }
+        if (pbrProg) { glDeleteProgram(pbrProg); pbrProg = 0; }
+        if (quadProg) { glDeleteProgram(quadProg); quadProg = 0; }
+        if (skyProg) { glDeleteProgram(skyProg); skyProg = 0; }
+        if (shadowProg) { glDeleteProgram(shadowProg); shadowProg = 0; }
 
         if (glContext) {
             SDL_GL_DeleteContext(glContext);
             glContext = nullptr;
         }
         isGLInitialized = false;
+        shadowMapReady = false;
     }
 
 private:
     bool BuildShaders() {
-        // 1. Cook-Torrance PBR Vertex Shader
+        // 0. Directional Shadow Depth Pass Shader (2048x2048)
+        const char* shadowVS = R"(
+#version 330 core
+layout (location = 0) in vec3 aPos;
+uniform mat4 uShadowMVP;
+void main() {
+    gl_Position = uShadowMVP * vec4(aPos, 1.0);
+}
+)";
+        const char* shadowFS = R"(
+#version 330 core
+void main() {
+    // Hardware depth written automatically
+}
+)";
+        GLuint shvs = CompileShader(GL_VERTEX_SHADER, shadowVS);
+        GLuint shfs = CompileShader(GL_FRAGMENT_SHADER, shadowFS);
+        if (shvs && shfs) {
+            shadowProg = glCreateProgram();
+            glAttachShader(shadowProg, shvs);
+            glAttachShader(shadowProg, shfs);
+            glLinkProgram(shadowProg);
+            glDeleteShader(shvs);
+            glDeleteShader(shfs);
+            uShadowMVPLoc = glGetUniformLocation(shadowProg, "uShadowMVP");
+        }
+
+        // 1. Cook-Torrance PBR Vertex Shader (with non-uniform scale Normal Matrix & Light-Space projection)
         const char* pbrVS = R"(
 #version 330 core
 layout (location = 0) in vec3 aPos;
@@ -505,22 +642,27 @@ layout (location = 3) in vec4 aColor;
 
 uniform mat4 uMVP;
 uniform mat4 uModel;
+uniform mat4 uLightSpaceMatrix;
 
 out vec3 vFragPos;
 out vec3 vNormal;
 out vec2 vTexCoord;
 out vec4 vColor;
+out vec4 vFragPosLightSpace;
 
 void main() {
-    vFragPos = vec3(uModel * vec4(aPos, 1.0));
-    vNormal = normalize(mat3(uModel) * aNormal);
+    vec4 worldPos = uModel * vec4(aPos, 1.0);
+    vFragPos = vec3(worldPos);
+    mat3 normalMat = transpose(inverse(mat3(uModel)));
+    vNormal = normalize(normalMat * aNormal);
     vTexCoord = aTexCoord;
     vColor = aColor;
+    vFragPosLightSpace = uLightSpaceMatrix * worldPos;
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )";
 
-        // 2. Cook-Torrance PBR Fragment Shader
+        // 2. Cook-Torrance PBR Fragment Shader (with 3x3 PCF Directional Shadow Map & Beat-Reactive Neon Pulse)
         const char* pbrFS = R"(
 #version 330 core
 out vec4 FragColor;
@@ -529,6 +671,7 @@ in vec3 vFragPos;
 in vec3 vNormal;
 in vec2 vTexCoord;
 in vec4 vColor;
+in vec4 vFragPosLightSpace;
 
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
@@ -540,6 +683,9 @@ uniform float uRoughness;
 uniform vec3 uEmissive;
 uniform sampler2D uAlbedoMap;
 uniform int uHasTexture;
+uniform sampler2D uShadowMap;
+uniform int uShadowMapEnabled;
+uniform float uBeatPulse;
 uniform vec3 uFogColor;
 uniform float uTime;
 uniform float uWetness;
@@ -658,7 +804,30 @@ void main() {
     vec3 specular = (NDF * G * F) / (4.0 * max(dot(effN, V), 0.0) * max(dot(effN, L), 0.0) + 0.0001);
 
     float NdotL = max(dot(effN, L), 0.0);
-    vec3 directLight = (kD * albedo / PI + specular) * uSunColor * NdotL;
+
+    // 3x3 PCF Directional Shadow Map Evaluation
+    float shadowFactor = 1.0;
+    if (uShadowMapEnabled == 1 && uShaderQuality >= 1) {
+        vec3 projCoords = vFragPosLightSpace.xyz / max(vFragPosLightSpace.w, 0.0001);
+        projCoords = projCoords * 0.5 + 0.5;
+        if (projCoords.x >= 0.01 && projCoords.x <= 0.99 &&
+            projCoords.y >= 0.01 && projCoords.y <= 0.99 &&
+            projCoords.z <= 0.998)
+        {
+            float bias = max(0.0035 * (1.0 - dot(N, L)), 0.0012);
+            vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0));
+            float shadowAcc = 0.0;
+            for (int sx = -1; sx <= 1; ++sx) {
+                for (int sy = -1; sy <= 1; ++sy) {
+                    float pcfDepth = texture(uShadowMap, projCoords.xy + vec2(sx, sy) * texelSize).r;
+                    shadowAcc += (projCoords.z - bias > pcfDepth) ? 0.42 : 1.0;
+                }
+            }
+            shadowFactor = shadowAcc / 9.0;
+        }
+    }
+
+    vec3 directLight = (kD * albedo / PI + specular) * uSunColor * NdotL * shadowFactor;
 
     // 2. Multi-Point Lights: Street Lamps, Neon Spotlights, and Player Aura
     vec3 pointLightAccum = vec3(0.0);
@@ -733,11 +902,12 @@ void main() {
         puddleReflection = skyReflect * waterFresnel * puddle;
     }
 
-    // 6. Emissive Radiant Glow (Windows, Shop signs, Neon billboards, Street lamp bulbs)
-    vec3 emissiveLight = uEmissive * uGlowIntensity;
+    // 6. Emissive Radiant Glow (Windows, Shop signs, Neon billboards, Street lamp bulbs + 128 BPM Beat Resonance)
+    float beatBoost = 1.0 + 0.14 * clamp(uBeatPulse, 0.0, 1.0);
+    vec3 emissiveLight = uEmissive * uGlowIntensity * beatBoost;
     if (uHasTexture == 1 && length(uEmissive) > 0.01) {
         // Multiplies the colorful storefront / neon texture content
-        emissiveLight = texSample.rgb * uEmissive * 1.6 * uGlowIntensity;
+        emissiveLight = texSample.rgb * uEmissive * 1.6 * uGlowIntensity * beatBoost;
     }
 
     vec3 color = ambient + directLight + pointLightAccum + bounceLight + rimLight + puddleReflection + emissiveLight;
@@ -774,6 +944,10 @@ void main() {
 
         uMVPLoc = glGetUniformLocation(pbrProg, "uMVP");
         uModelLoc = glGetUniformLocation(pbrProg, "uModel");
+        uLightSpaceMatrixLoc = glGetUniformLocation(pbrProg, "uLightSpaceMatrix");
+        uShadowMapLoc = glGetUniformLocation(pbrProg, "uShadowMap");
+        uShadowMapEnabledLoc = glGetUniformLocation(pbrProg, "uShadowMapEnabled");
+        uBeatPulseLoc = glGetUniformLocation(pbrProg, "uBeatPulse");
         uSunDirLoc = glGetUniformLocation(pbrProg, "uSunDir");
         uSunColorLoc = glGetUniformLocation(pbrProg, "uSunColor");
         uAmbientColorLoc = glGetUniformLocation(pbrProg, "uAmbientColor");
@@ -988,6 +1162,29 @@ void main() {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, screenWidth, screenHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+
+    void SetupShadowMap() {
+        glGenFramebuffers(1, &shadowFBO);
+        glGenTextures(1, &shadowDepthTex);
+        glBindTexture(GL_TEXTURE_2D, shadowDepthTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowDepthTex, 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            glDeleteFramebuffers(1, &shadowFBO);
+            glDeleteTextures(1, &shadowDepthTex);
+            shadowFBO = 0;
+            shadowDepthTex = 0;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 };
 

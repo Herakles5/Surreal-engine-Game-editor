@@ -122,6 +122,7 @@ public:
         const ColorRGB& lightRadiance,
         const PBRMaterial& mat)
     {
+        (void)worldPos;
         Vec3 N = normal.Normalized();
         Vec3 V = viewDir.Normalized();
         Vec3 L = lightDir.Normalized();

@@ -381,7 +381,7 @@ public:
     }
 
     /**
-     * 7. Scan a Directory for 3D Models (.obj, .gltf, .glb) + <dir>/photo3d/*.png|jpg for Photo-to-3D
+     * 7. Scan a Directory for 3D Models (.obj, .gltf, .glb) + <dir>/photo3d/<img.png|jpg> for Photo-to-3D
      */
     static std::vector<DiscoveredModelFile> ScanFolder(const std::string& folderPath) {
         std::vector<DiscoveredModelFile> results;

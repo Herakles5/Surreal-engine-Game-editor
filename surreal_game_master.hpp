@@ -695,6 +695,7 @@ public:
 
     // ---------- 3D Rendering of Beacons, Checkpoints & Haptic-Visual Shockwaves ----------
     void Render3D(SurrealHybridRenderer& renderer, const Mat4& vpMat, const Vec3& sunDir) {
+        (void)sunDir;
         // Gen 4875 Wish #2: Render 3D Haptic-Visual Sensory Shockwave Rings on the ground
         if (shockwaveDiscMesh && !shockwaves.empty()) {
             glEnable(GL_BLEND);

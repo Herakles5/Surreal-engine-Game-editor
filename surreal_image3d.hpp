@@ -491,7 +491,6 @@ public:
             float baseChamfer = Hmax * std::sqrt(std::max(0.0f, 1.0f - (1.0f - t) * (1.0f - t)));
             hh[i] = baseChamfer;
 
-            float yRel = static_cast<float>(y) / static_cast<float>(gh);
             float dx = (x - xCenterLocal[i]) / localWidth[i];
             dx = std::max(-1.0f, std::min(1.0f, dx));
             float vHull = std::sqrt(std::max(0.05f, 1.0f - dx * dx));

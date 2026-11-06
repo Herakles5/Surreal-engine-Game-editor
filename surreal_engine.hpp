@@ -90,6 +90,7 @@ public:
     }
 
     void Clear(uint32_t clearColor = 0xFF050811) {
+        (void)clearColor;
         if (!framebuffer || !depthBuffer) return;
         #pragma omp parallel for schedule(static)
         for (uint32_t y = 0; y < screenHeight; ++y) {
