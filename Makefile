@@ -16,7 +16,7 @@ SRCS_PHOTO = photo3d_preview.cpp
 
 all: $(TARGET_STUDIO) $(TARGET_BENCH) $(TARGET_PHOTO)
 
-$(TARGET_STUDIO): $(SRCS_STUDIO)
+$(TARGET_STUDIO): $(SRCS_STUDIO) *.hpp
 	@echo "[BUILD] Compiling Surreal 3D Studio..."
 	$(CXX) $(CXXFLAGS) $(SRCS_STUDIO) $(LDFLAGS) -o $(TARGET_STUDIO)
 	@echo "[✓] $(TARGET_STUDIO) built successfully."
