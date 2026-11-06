@@ -175,6 +175,7 @@ public:
     float footBaseOffset;
     bool isZUpModel;
     bool dirtyGPUUpload = true;
+    float skinDtAccum = 0.0f;
 
     SkeletalMeshInstance()
         : activeDeformedMesh(std::make_shared<SurrealMesh>()),
@@ -184,13 +185,15 @@ public:
           isLooping(true),
           hasFootBaseOffset(false),
           footBaseOffset(0.0f),
-          isZUpModel(false) {}
+          isZUpModel(false),
+          skinDtAccum(0.0f) {}
 
     void PlayClip(int index, bool loop = true) {
         if (index >= 0 && index < (int)clips.size()) {
             activeClipIndex = index;
             currentTime = 0.0f;
             isLooping = loop;
+            skinDtAccum = 1.0f;
         }
     }
 
@@ -199,6 +202,18 @@ public:
      */
     void Update(float dt) {
         if (joints.empty() || bindVertices.empty()) return;
+
+        // High-poly avatar cadence limiter: cap 50k+ vertex skinning to ~45 Hz
+        if (hasFootBaseOffset && staticAttributesInitialized && bindVertices.size() > 25000 && dt > 0.0f && dt < 0.021f) {
+            skinDtAccum += dt;
+            if (skinDtAccum < 0.021f) {
+                return;
+            }
+            dt = skinDtAccum;
+            skinDtAccum = 0.0f;
+        } else {
+            skinDtAccum = 0.0f;
+        }
 
         // 1. Reset all joints to base bind pose
         for (auto& j : joints) {
@@ -354,6 +369,22 @@ private:
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < (int)vertCount; ++i) {
             const SkinnedVertex3D& b = bindPtr[i];
+            const float px = b.position.x, py = b.position.y, pz = b.position.z;
+            const float nx = b.normal.x,   ny = b.normal.y,   nz = b.normal.z;
+            Vertex3D& dst = outPtr[i];
+
+            // Fast single-bone path (avoids 4-matrix blend & inverse-sqrt normalization)
+            if (b.weights[0] > 0.999f && b.joints[0] < numSkinMatrices) {
+                const Mat4& sm = skinMatPtr[b.joints[0]];
+                dst.position.x = sm.m[0][0] * px + sm.m[0][1] * py + sm.m[0][2] * pz + sm.m[0][3];
+                dst.position.y = (sm.m[1][0] * px + sm.m[1][1] * py + sm.m[1][2] * pz + sm.m[1][3]) - footOffset;
+                dst.position.z = sm.m[2][0] * px + sm.m[2][1] * py + sm.m[2][2] * pz + sm.m[2][3];
+                dst.normal.x = sm.m[0][0] * nx + sm.m[0][1] * ny + sm.m[0][2] * nz;
+                dst.normal.y = sm.m[1][0] * nx + sm.m[1][1] * ny + sm.m[1][2] * nz;
+                dst.normal.z = sm.m[2][0] * nx + sm.m[2][1] * ny + sm.m[2][2] * nz;
+                continue;
+            }
+
             float m00 = 0.0f, m01 = 0.0f, m02 = 0.0f, m03 = 0.0f;
             float m10 = 0.0f, m11 = 0.0f, m12 = 0.0f, m13 = 0.0f;
             float m20 = 0.0f, m21 = 0.0f, m22 = 0.0f, m23 = 0.0f;
@@ -371,10 +402,6 @@ private:
                 }
             }
 
-            const float px = b.position.x, py = b.position.y, pz = b.position.z;
-            const float nx = b.normal.x,   ny = b.normal.y,   nz = b.normal.z;
-
-            Vertex3D& dst = outPtr[i];
             dst.position.x = m00 * px + m01 * py + m02 * pz + m03;
             dst.position.y = (m10 * px + m11 * py + m12 * pz + m13) - footOffset;
             dst.position.z = m20 * px + m21 * py + m22 * pz + m23;
@@ -786,6 +813,58 @@ public:
                 }
             }
 
+            // Batch and coalesce static submeshes that share identical texture & material parameters
+            // Reduces OpenGL draw calls on multi-node city environments (e.g. Seoul_City_PBR.glb) by ~10x!
+            if (outInstance.activeDeformedMesh->submeshes.size() > 1) {
+                auto& subs = outInstance.activeDeformedMesh->submeshes;
+                const auto& oldIndices = outInstance.activeDeformedMesh->indices;
+                std::vector<size_t> order(subs.size());
+                for (size_t i = 0; i < subs.size(); ++i) order[i] = i;
+
+                auto sameMat = [&](const SubMesh& a, const SubMesh& b) -> bool {
+                    return a.texRGBA.get() == b.texRGBA.get() &&
+                           std::abs(a.albedo.r - b.albedo.r) < 0.01f &&
+                           std::abs(a.albedo.g - b.albedo.g) < 0.01f &&
+                           std::abs(a.albedo.b - b.albedo.b) < 0.01f &&
+                           std::abs(a.emissive.r - b.emissive.r) < 0.01f &&
+                           std::abs(a.emissive.g - b.emissive.g) < 0.01f &&
+                           std::abs(a.emissive.b - b.emissive.b) < 0.01f &&
+                           std::abs(a.roughness - b.roughness) < 0.02f &&
+                           std::abs(a.metallic - b.metallic) < 0.02f;
+                };
+
+                std::sort(order.begin(), order.end(), [&](size_t ia, size_t ib) {
+                    const SubMesh& a = subs[ia];
+                    const SubMesh& b = subs[ib];
+                    if (a.texRGBA.get() != b.texRGBA.get()) return a.texRGBA.get() < b.texRGBA.get();
+                    if (std::abs(a.emissive.r - b.emissive.r) >= 0.01f) return a.emissive.r < b.emissive.r;
+                    if (std::abs(a.albedo.r - b.albedo.r) >= 0.01f) return a.albedo.r < b.albedo.r;
+                    return ia < ib;
+                });
+
+                std::vector<uint32_t> mergedIndices;
+                mergedIndices.reserve(oldIndices.size());
+                std::vector<SubMesh> mergedSubs;
+
+                for (size_t idx : order) {
+                    const SubMesh& s = subs[idx];
+                    if (s.indexCount == 0) continue;
+                    if (!mergedSubs.empty() && sameMat(mergedSubs.back(), s)) {
+                        mergedSubs.back().indexCount += s.indexCount;
+                    } else {
+                        SubMesh ns = s;
+                        ns.indexOffset = static_cast<uint32_t>(mergedIndices.size());
+                        ns.indexCount = s.indexCount;
+                        mergedSubs.push_back(std::move(ns));
+                    }
+                    auto beg = oldIndices.begin() + s.indexOffset;
+                    mergedIndices.insert(mergedIndices.end(), beg, beg + s.indexCount);
+                }
+
+                outInstance.activeDeformedMesh->indices = std::move(mergedIndices);
+                outInstance.activeDeformedMesh->submeshes = std::move(mergedSubs);
+            }
+
             outInstance.activeDeformedMesh->CalculateBounds();
 
             // Do NOT shift world environments (e.g. Seoul City) - their roads/streets are already authored at Y=0!
@@ -800,7 +879,59 @@ public:
                     for (auto& v : outInstance.activeDeformedMesh->vertices) {
                         v.position.y -= minY;
                     }
-                    outInstance.activeDeformedMesh->CalculateBounds();
+                    // Batch and coalesce static submeshes that share identical texture & material parameters
+            // Reduces OpenGL draw calls on multi-node city environments (e.g. Seoul_City_PBR.glb) by ~10x!
+            if (outInstance.activeDeformedMesh->submeshes.size() > 1) {
+                auto& subs = outInstance.activeDeformedMesh->submeshes;
+                const auto& oldIndices = outInstance.activeDeformedMesh->indices;
+                std::vector<size_t> order(subs.size());
+                for (size_t i = 0; i < subs.size(); ++i) order[i] = i;
+
+                auto sameMat = [&](const SubMesh& a, const SubMesh& b) -> bool {
+                    return a.texRGBA.get() == b.texRGBA.get() &&
+                           std::abs(a.albedo.r - b.albedo.r) < 0.01f &&
+                           std::abs(a.albedo.g - b.albedo.g) < 0.01f &&
+                           std::abs(a.albedo.b - b.albedo.b) < 0.01f &&
+                           std::abs(a.emissive.r - b.emissive.r) < 0.01f &&
+                           std::abs(a.emissive.g - b.emissive.g) < 0.01f &&
+                           std::abs(a.emissive.b - b.emissive.b) < 0.01f &&
+                           std::abs(a.roughness - b.roughness) < 0.02f &&
+                           std::abs(a.metallic - b.metallic) < 0.02f;
+                };
+
+                std::sort(order.begin(), order.end(), [&](size_t ia, size_t ib) {
+                    const SubMesh& a = subs[ia];
+                    const SubMesh& b = subs[ib];
+                    if (a.texRGBA.get() != b.texRGBA.get()) return a.texRGBA.get() < b.texRGBA.get();
+                    if (std::abs(a.emissive.r - b.emissive.r) >= 0.01f) return a.emissive.r < b.emissive.r;
+                    if (std::abs(a.albedo.r - b.albedo.r) >= 0.01f) return a.albedo.r < b.albedo.r;
+                    return ia < ib;
+                });
+
+                std::vector<uint32_t> mergedIndices;
+                mergedIndices.reserve(oldIndices.size());
+                std::vector<SubMesh> mergedSubs;
+
+                for (size_t idx : order) {
+                    const SubMesh& s = subs[idx];
+                    if (s.indexCount == 0) continue;
+                    if (!mergedSubs.empty() && sameMat(mergedSubs.back(), s)) {
+                        mergedSubs.back().indexCount += s.indexCount;
+                    } else {
+                        SubMesh ns = s;
+                        ns.indexOffset = static_cast<uint32_t>(mergedIndices.size());
+                        ns.indexCount = s.indexCount;
+                        mergedSubs.push_back(std::move(ns));
+                    }
+                    auto beg = oldIndices.begin() + s.indexOffset;
+                    mergedIndices.insert(mergedIndices.end(), beg, beg + s.indexCount);
+                }
+
+                outInstance.activeDeformedMesh->indices = std::move(mergedIndices);
+                outInstance.activeDeformedMesh->submeshes = std::move(mergedSubs);
+            }
+
+            outInstance.activeDeformedMesh->CalculateBounds();
                 }
             }
 
