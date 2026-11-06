@@ -67,6 +67,7 @@ public:
     // Uniform Locations
     GLint uMVPLoc;
     GLint uModelLoc;
+    GLint uNormalMatLoc;
     GLint uLightSpaceMatrixLoc;
     GLint uShadowMapLoc;
     GLint uShadowMapEnabledLoc;
@@ -124,7 +125,7 @@ public:
           screenTex(0), hudTex(0),
           shadowFBO(0), shadowDepthTex(0),
           lightSpaceMatrix(Mat4::Identity()),
-          uMVPLoc(-1), uModelLoc(-1),
+          uMVPLoc(-1), uModelLoc(-1), uNormalMatLoc(-1),
           uLightSpaceMatrixLoc(-1), uShadowMapLoc(-1),
           uShadowMapEnabledLoc(-1), uBeatPulseLoc(-1),
           uShadowMVPLoc(-1),
@@ -159,7 +160,7 @@ public:
         }
 
         SDL_GL_MakeCurrent(window, glContext);
-        SDL_GL_SetSwapInterval(1); // VSync
+        SDL_GL_SetSwapInterval(0); // Unlocked framerate (prevents 60->30->15 FPS VSync stall)
 
         glVendor = (const char*)glGetString(GL_VENDOR);
         glRenderer = (const char*)glGetString(GL_RENDERER);
