@@ -37,3 +37,4 @@ void main() {
     vec3 res = clamp((c.rgb + (n + s + w + e) * wRGB) * rcpWeight, 0.0, 1.0);
     outColor = vec4(res, c.a);
 }
+
