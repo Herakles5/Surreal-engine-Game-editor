@@ -14,13 +14,13 @@
 # ==============================================================================
 
 ENABLE_VKBASALT_OPT=0
-ENABLE_HUD=0
+ENABLE_HUD=1
 FPS_CAP=""
-LAYER_AF=""
+LAYER_AF="16"
 LAYER_LOD=""
-LAYER_SCALE=""
+LAYER_SCALE="0.67"
 LAYER_FILTER=""
-LAYER_SHARPEN=""
+LAYER_SHARPEN="0.55"
 LAYER_LOG=0
 LAYER_SO="/usr/lib/surreal-boost/libVkLayer_surreal_boost.so"
 
@@ -61,6 +61,10 @@ while [ $# -gt 0 ]; do
             ;;
         --hud|--overlay)
             ENABLE_HUD=1
+            shift
+            ;;
+        --no-hud)
+            ENABLE_HUD=0
             shift
             ;;
         --af)
