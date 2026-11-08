@@ -1,0 +1,244 @@
+#!/bin/bash
+# ==============================================================================
+# AION SURREAL BOOST (v1.1) — Linux / Steam GTX 1060 6GB Game Accelerator
+# ==============================================================================
+# Drop-in Steam Launch Wrapper & Vulkan/OpenGL/Proton Booster for CosmOS Linux:
+#   Steam Launch Options:
+#     surreal-boost %command%                     (Default: GTX 1060 Lock + 8x AF + Pascal DX11/12 Boost + exFAT Fix)
+#     surreal-boost --scale quality %command%     (+ GPU Spatial Upscaler 0.67x + CAS 0.55 Sharpening)
+#     surreal-boost --scale 0.50 %command%        (+ Performance 0.50x Upscaler + CAS Sharpening)
+#     surreal-boost --fsr %command%               (+ Native CAS Post-Sharpening + Proton FSR Upscaling)
+#     surreal-boost --hud %command%               (+ Live Surreal FPS/GPU/Frametime Overlay [RShift+F12])
+#     surreal-boost --fps 60 %command%            (+ Hardware-smooth 60 FPS Frame-Pacing Cap)
+#     surreal-boost --status                      (Show current GPU / Vulkan / Layer / Cache status)
+# ==============================================================================
+
+ENABLE_VKBASALT_OPT=0
+ENABLE_HUD=0
+FPS_CAP=""
+LAYER_AF=""
+LAYER_LOD=""
+LAYER_SCALE=""
+LAYER_FILTER=""
+LAYER_SHARPEN=""
+LAYER_LOG=0
+LAYER_SO="/usr/lib/surreal-boost/libVkLayer_surreal_boost.so"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --scale|-s)
+            case "${2:-}" in
+                ultra)       LAYER_SCALE="0.77"; shift 2 ;;
+                quality)     LAYER_SCALE="0.67"; shift 2 ;;
+                balanced)    LAYER_SCALE="0.59"; shift 2 ;;
+                performance|perf) LAYER_SCALE="0.50"; shift 2 ;;
+                native|off)  LAYER_SCALE="1.00"; shift 2 ;;
+                [0-9]*|.[0-9]*) LAYER_SCALE="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+            ;;
+        --filter)
+            if [ "${2:-}" = "nearest" ] || [ "${2:-}" = "linear" ]; then
+                LAYER_FILTER="$2"; shift 2
+            else
+                shift
+            fi
+            ;;
+        --sharpen)
+            if [ -n "${2:-}" ] && [[ "${2:-}" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+                LAYER_SHARPEN="$2"; shift 2
+            else
+                LAYER_SHARPEN="0.55"; shift
+            fi
+            ;;
+        --fsr|--cas)
+            LAYER_SHARPEN="${LAYER_SHARPEN:-0.55}"
+            shift
+            ;;
+        --vkbasalt)
+            ENABLE_VKBASALT_OPT=1
+            shift
+            ;;
+        --hud|--overlay)
+            ENABLE_HUD=1
+            shift
+            ;;
+        --af)
+            if [ -n "${2:-}" ] && [[ "${2:-}" =~ ^[0-9]+$ ]]; then LAYER_AF="$2"; shift 2; else shift; fi
+            ;;
+        --lod)
+            if [ -n "${2:-}" ] && [[ "${2:-}" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then LAYER_LOD="$2"; shift 2; else shift; fi
+            ;;
+        --log)
+            LAYER_LOG=1
+            shift
+            ;;
+        --fps|--limit)
+            if [ -n "${2:-}" ] && [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+                FPS_CAP="$2"
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        --status)
+            echo "=== AION SURREAL BOOST v1.1 — HARDWARE & VULKAN STATUS ==="
+            /usr/local/bin/cosmos-gpu-mode status
+            echo ""
+            echo "Shader Cache : /root/.cache/surreal_shader_cache"
+            echo "DXVK Cache   : /root/.cache/surreal_dxvk_cache"
+            echo "Vulkan layer : $([ -f "$LAYER_SO" ] && echo 'VK_LAYER_SURREAL_boost v1.1 installed (Spatial Upscaler + CAS / AF / LOD / Frame Pacing)' || echo 'not installed')"
+            echo "Debian pkg   : $(dpkg-query -W -f='${Package} ${Version} (${Status})\n' surreal-boost-layer 2>/dev/null || echo 'unpacked via make install')"
+            echo "Layer config : /etc/surreal-boost/layer.conf  (override: ~/.config/surreal-boost/layer.conf)"
+            echo "vkBasalt     : $(command -v vkbasalt >/dev/null 2>&1 || [ -f /usr/share/vulkan/implicit_layer.d/vkBasalt.json ] && echo 'Installed (Toggle: Home/Pos1 via --vkbasalt)' || echo 'Not found')"
+            echo "MangoHud     : $(command -v mangohud >/dev/null 2>&1 && echo 'Installed (Toggle: RightShift+F12 via --hud)' || echo 'Not found')"
+            exit 0
+            ;;
+        --help|-h)
+            echo "Usage: surreal-boost [options] <command> [args...]"
+            echo "  --scale <0.40..1.0|ultra|quality|balanced|performance>  GPU Spatial Upscaler + CAS"
+            echo "  --sharpen [0.0..1.0]  Contrast Adaptive Sharpening (default 0.55; works at native 1.0x too)"
+            echo "  --filter <linear|nearest>  Upscale texture filter (default: linear)"
+            echo "  --fsr / --cas         Enable built-in CAS (0.55) + Proton Fullscreen FSR"
+            echo "  --af <2..16>          Raise trilinear samplers to N x Anisotropic Filtering"
+            echo "  --lod <-2.0..2.0>     Texture mip LOD bias (- = sharper, + = faster)"
+            echo "  --fps <N>             Sub-ms hybrid sleep+spin frame-rate cap"
+            echo "  --hud                 Enable MangoHud live FPS/frametime overlay"
+            echo "  --log                 Write avg FPS & 1% low telemetry to /tmp/surreal_layer.log"
+            echo "  --status              Show GPU, Vulkan layer & package status"
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [ $# -eq 0 ]; then
+    echo "[surreal-boost] Usage: surreal-boost [--scale quality|0.67] [--sharpen 0.55] [--hud] [--fps N] %command%"
+    exit 1
+fi
+
+LOG_FILE="/tmp/surreal_boost.log"
+log_boost() {
+    echo "$(date '+%F %T') [surreal-boost] $*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------------------
+# 1. Smart GTX 1060 Wake-Up (only if NO passthrough VM is currently running!)
+# ------------------------------------------------------------------------------
+ACTIVE_VMS="$(virsh -c qemu:///system list --name 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -z "$ACTIVE_VMS" ] && [ ! -e "/sys/bus/pci/drivers/nvidia/0000:01:00.0" ]; then
+    log_boost "No VM active and GTX 1060 not bound to nvidia -> switching GTX 1060 to Linux Host mode..."
+    /usr/local/bin/cosmos-gpu-mode host >/dev/null 2>&1 || true
+fi
+
+# ------------------------------------------------------------------------------
+# 2. Automatic exFAT / vfat Proton Compatdata Redirect (500GB Drive Support!)
+# ------------------------------------------------------------------------------
+if [ -n "${STEAM_COMPAT_DATA_PATH:-}" ]; then
+    COMPAT_PARENT="$(dirname "$STEAM_COMPAT_DATA_PATH")"
+    mkdir -p "$COMPAT_PARENT" 2>/dev/null || true
+    FS_TYPE="$(stat -f -c %T "$COMPAT_PARENT" 2>/dev/null || true)"
+    case "$FS_TYPE" in
+        msdos|vfat|exfat|fuseblk)
+            APP_KEY="${SteamAppId:-${STEAM_COMPAT_INSTALL_PATH##*/}}"
+            APP_KEY="$(echo "${APP_KEY:-shared}" | tr -cd 'a-zA-Z0-9_-')"
+            SAFE_COMPAT="/root/.steam/debian-installation/steamapps/compatdata/${APP_KEY}"
+            mkdir -p "$SAFE_COMPAT"
+            export STEAM_COMPAT_DATA_PATH="$SAFE_COMPAT"
+            log_boost "Redirected exFAT/FUSE STEAM_COMPAT_DATA_PATH -> $SAFE_COMPAT (ext4)"
+            ;;
+    esac
+fi
+
+# ------------------------------------------------------------------------------
+# 3. Guarantee GTX 1060 6GB (10de:1c03) Selection (OpenGL + Vulkan + DXVK + VKD3D)
+# ------------------------------------------------------------------------------
+if [ -e "/sys/bus/pci/drivers/nvidia/0000:01:00.0" ]; then
+    export __NV_PRIME_RENDER_OFFLOAD=1
+    export __NV_PRIME_RENDER_OFFLOAD_PROVIDER=NVIDIA-G0
+    export __GLX_VENDOR_LIBRARY_NAME=nvidia
+    export __VK_LAYER_NV_optimus=NVIDIA_only
+    # Disable Mesa's X11 DRI3 screen-owner auto-selector (which otherwise picks
+    # Intel HD 630 when the monitor is plugged into onboard HDMI!) so that
+    # VK_LAYER_SURREAL_boost + NV_optimus lock GPU #0 to GTX 1060 6GB:
+    export NODEVICE_SELECT=1
+    export DXVK_FILTER_DEVICE_NAME="NVIDIA GeForce GTX 1060"
+    export VKD3D_FILTER_DEVICE_NAME="NVIDIA GeForce GTX 1060"
+    export DRI_PRIME=1
+fi
+
+# ------------------------------------------------------------------------------
+# 4. NVIDIA Pascal (GTX 1060) Driver, Shader-Cache & DX11/DX12 Pipeline Tuning
+# ------------------------------------------------------------------------------
+mkdir -p /root/.cache/surreal_shader_cache /root/.cache/surreal_dxvk_cache
+
+export __GL_THREADED_OPTIMIZATIONS=1
+export __GL_SHADER_DISK_CACHE=1
+export __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
+export __GL_SHADER_DISK_CACHE_SIZE=10737418240
+export __GL_SHADER_DISK_CACHE_PATH="/root/.cache/surreal_shader_cache"
+
+export DXVK_STATE_CACHE=1
+export DXVK_STATE_CACHE_PATH="/root/.cache/surreal_dxvk_cache"
+export DXVK_LOG_LEVEL=none
+if [ -z "${VKD3D_CONFIG:-}" ]; then
+    export VKD3D_CONFIG="no_upload_hvv"
+fi
+
+export PROTON_USE_FSYNC=1
+export PROTON_FORCE_LARGE_ADDRESS_AWARE=1
+export WINE_FULLSCREEN_FSR=1
+export WINE_FULLSCREEN_FSR_STRENGTH=2
+
+# ------------------------------------------------------------------------------
+# 5. Surreal Boost Vulkan Layer (Upscaler + CAS + AF + LOD + Frame Pacing)
+# ------------------------------------------------------------------------------
+if [ "$ENABLE_VKBASALT_OPT" -eq 1 ]; then
+    export ENABLE_VKBASALT=1
+    export VKBASALT_CONFIG_FILE="/root/.config/vkBasalt/vkBasalt.conf"
+fi
+
+if [ -f "$LAYER_SO" ]; then
+    export SURREAL_BOOST=1
+    [ -n "$LAYER_SCALE" ]   && export SURREAL_SCALE="$LAYER_SCALE"
+    [ -n "$LAYER_FILTER" ]  && export SURREAL_SCALE_FILTER="$LAYER_FILTER"
+    [ -n "$LAYER_SHARPEN" ] && export SURREAL_SHARPEN="$LAYER_SHARPEN"
+    [ -n "$LAYER_AF" ]      && export SURREAL_AF="$LAYER_AF"
+    [ -n "$LAYER_LOD" ]     && export SURREAL_LOD_BIAS="$LAYER_LOD"
+    [ "$LAYER_LOG" -eq 1 ]  && export SURREAL_LOG=1
+    [ -n "$FPS_CAP" ]       && export SURREAL_FPS_CAP="$FPS_CAP"
+fi
+
+if [ -n "$FPS_CAP" ] && [ ! -f "$LAYER_SO" ]; then
+    export MANGOHUD=1
+    if [ "$ENABLE_HUD" -eq 1 ]; then
+        export MANGOHUD_CONFIG="read_cfg,fps_limit=${FPS_CAP}"
+    else
+        export MANGOHUD_CONFIG="no_display,fps_limit=${FPS_CAP}"
+    fi
+elif [ "$ENABLE_HUD" -eq 1 ]; then
+    export MANGOHUD=1
+fi
+
+# ------------------------------------------------------------------------------
+# 6. CosmOS CPU Governor, I/O Scheduler & PipeWire Low-Latency Audio Boost
+# ------------------------------------------------------------------------------
+for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -w "$gov" ] && echo "performance" > "$gov" 2>/dev/null || true
+done
+
+export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-512/48000}"
+
+log_boost "Launching: $* (SCALE=${LAYER_SCALE:-1.0} SHARPEN=${LAYER_SHARPEN:-auto} HUD=$ENABLE_HUD FPS_CAP=${FPS_CAP:-none} COMPAT=${STEAM_COMPAT_DATA_PATH:-native})"
+
+if command -v ionice >/dev/null 2>&1; then
+    exec ionice -c 2 -n 0 nice -n -5 "$@"
+else
+    exec nice -n -5 "$@"
+fi

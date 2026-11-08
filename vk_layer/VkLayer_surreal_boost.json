@@ -1,0 +1,20 @@
+{
+  "file_format_version": "1.2.0",
+  "layer": {
+    "name": "VK_LAYER_SURREAL_boost",
+    "type": "GLOBAL",
+    "library_path": "/usr/lib/surreal-boost/libVkLayer_surreal_boost.so",
+    "api_version": "1.3.0",
+    "implementation_version": "2",
+    "description": "AION Surreal Boost v1.1: Spatial Upscaler + CAS Sharpening, Anisotropic Filtering, LOD Bias, Frame Pacing & Telemetry for Vulkan / Steam Proton",
+    "functions": {
+      "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"
+    },
+    "enable_environment": {
+      "SURREAL_BOOST": "1"
+    },
+    "disable_environment": {
+      "SURREAL_BOOST_DISABLE": "1"
+    }
+  }
+}
