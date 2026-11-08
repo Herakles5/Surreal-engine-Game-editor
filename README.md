@@ -154,6 +154,28 @@ This installs:
 - Binaries: `/usr/local/bin/surreal-editor` & `/usr/local/bin/surreal-bench`
 - Pkg-Config: `/usr/local/lib/pkgconfig/surreal.pc`
 
+### 3. Surreal Boost Vulkan Layer & Game Accelerator (`surreal-boost-layer` `.deb`)
+Surreal Engine ships with an installable **C++17 Vulkan Implicit Layer (`VK_LAYER_SURREAL_boost` v1.1)** and launcher (`surreal-boost`) in [`vk_layer/`](vk_layer/) and [`scripts/surreal-boost`](scripts/surreal-boost) that accelerates **any** native Linux Vulkan game and **Steam Proton** (`DXVK` / `VKD3D-Proton`) game on top of the GPU driver:
+- **GPU Spatial Render-Scale Upscaler + Contrast Adaptive Sharpening (CAS)**: Renders games at a scaled internal resolution (`--scale ultra|quality|balanced|performance` or `0.40..0.99`) and upscales to native window/fullscreen resolution via an embedded SPIR-V 5-tap CAS shader (`--sharpen 0.0..1.0`).
+- **Discrete GPU Priority Lock**: Hooks `vkEnumeratePhysicalDevices` and disables Mesa's X11 screen-owner override (`NODEVICE_SELECT=1`) so PRIME Render Offload setups (e.g. monitor on onboard HDMI + discrete NVIDIA GTX 1060) always run games on the discrete GPU.
+- **Anisotropic Filtering & Texture LOD Bias**: Upgrades trilinear mipmapped game textures up to `16x AF` (`--af 2..16`) and shifts mip bias (`--lod -2..2`).
+- **Sub-Millisecond Hybrid Frame Pacing & 1%-Low Telemetry**: Sleep + spin-wait frame limiter (`--fps N`) and live `1% low` frametime logger (`--log` -> `/tmp/surreal_layer.log`).
+- **Steam `pressure-vessel` Ready**: Linked with `-static-libstdc++ -static-libgcc` and zero external shader file dependencies so it loads seamlessly inside `SteamLinuxRuntime_sniper`.
+
+Build & install the `.deb` package:
+```bash
+cd vk_layer
+./build-deb.sh 1.1.0
+sudo dpkg -i build/surreal-boost-layer_1.1.0_amd64.deb
+```
+
+Steam Launch Options examples:
+```text
+surreal-boost %command%
+surreal-boost --scale quality %command%
+surreal-boost --scale 0.67 --fps 60 --hud %command%
+```
+
 ---
 
 ## 🧠 Aion Nexus Link (Evolution Engine ↔ Surreal Studio)
