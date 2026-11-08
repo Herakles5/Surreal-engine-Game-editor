@@ -366,7 +366,8 @@ private:
         Vertex3D* __restrict outPtr = activeDeformedMesh->vertices.data();
 
         // Multi-threaded Pre-Blended 3x4 Affine Linear Blend Skinning (LBS) via OpenMP
-        #pragma omp parallel for schedule(static)
+        // Avoid thread-barrier wakeups for compact (<8192 vertex) auto-rigged dancers
+        #pragma omp parallel for schedule(static) if(vertCount >= 8192)
         for (int i = 0; i < (int)vertCount; ++i) {
             const SkinnedVertex3D& b = bindPtr[i];
             const float px = b.position.x, py = b.position.y, pz = b.position.z;

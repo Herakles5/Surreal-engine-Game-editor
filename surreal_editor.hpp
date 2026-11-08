@@ -1050,13 +1050,163 @@ public:
         SetStatus("[-] Deleted Entity: " + delName);
     }
 
+    struct LearnedChoreoEntry {
+        std::string name;
+        float bpm = 128.0f;
+        float hipSway = 1.25f;
+        float armWave = 1.25f;
+    };
+
+    std::vector<LearnedChoreoEntry> aionLearnedChoreos;
+    int activeLearnedChoreoIdx = -1;
+    float activeStageBPM = 128.0f;
+    float activeChoreoHipMult = 1.0f;
+    float activeChoreoArmMult = 1.0f;
+    std::filesystem::file_time_type lastChoreoMemMTime{};
+    bool choreoMemInitialized = false;
+
+    void ApplyActiveLearnedChoreo(bool announce = true) {
+        if (activeLearnedChoreoIdx < 0 || activeLearnedChoreoIdx >= static_cast<int>(aionLearnedChoreos.size())) {
+            activeStageBPM = 128.0f;
+            activeChoreoHipMult = 1.0f;
+            activeChoreoArmMult = 1.0f;
+            return;
+        }
+        const auto& ch = aionLearnedChoreos[activeLearnedChoreoIdx];
+        activeStageBPM = std::clamp(ch.bpm, 75.0f, 195.0f);
+        activeChoreoHipMult = std::clamp(ch.hipSway, 0.65f, 1.85f);
+        activeChoreoArmMult = std::clamp(ch.armWave, 0.65f, 1.85f);
+
+        float speedScale = activeStageBPM / 125.0f;
+        for (auto& pair : animatedEntities) {
+            if (pair.second) {
+                pair.second->playbackSpeed = speedScale;
+            }
+        }
+        if (announce) {
+            char buf[200];
+            std::snprintf(buf, sizeof(buf), "[★ CHOREO-LINK ★] %s (%.0f BPM | Sway %.2f) [L]",
+                          ch.name.c_str(), activeStageBPM, activeChoreoHipMult);
+            SetStatus(buf, 4.5f);
+        }
+    }
+
+    void CycleAionLearnedChoreo() {
+        if (aionLearnedChoreos.empty()) {
+            SetStatus("[!] Noch keine gelernten Video-Choreografien im Aion Memory gefunden.", 3.5f);
+            return;
+        }
+        activeLearnedChoreoIdx = (activeLearnedChoreoIdx + 1) % static_cast<int>(aionLearnedChoreos.size());
+        ApplyActiveLearnedChoreo(true);
+    }
+
+    bool SyncAionChoreoMemory(const std::string& jsonPath = "/root/coding/AI_Desktop/aion_minime_memory.json") {
+        std::error_code ec;
+        if (!std::filesystem::exists(jsonPath, ec)) return false;
+        auto mtime = std::filesystem::last_write_time(jsonPath, ec);
+        if (ec) return false;
+        if (choreoMemInitialized && mtime == lastChoreoMemMTime) return false;
+        lastChoreoMemMTime = mtime;
+        bool wasInitialized = choreoMemInitialized;
+        choreoMemInitialized = true;
+
+        std::ifstream f(jsonPath);
+        if (!f.is_open()) return false;
+        std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        f.close();
+
+        size_t arrKey = content.find("\"learned_choreographies\"");
+        if (arrKey == std::string::npos) return false;
+        size_t openBr = content.find('[', arrKey);
+        if (openBr == std::string::npos) return false;
+
+        // Find matching ']'
+        int depth = 0;
+        size_t closeBr = std::string::npos;
+        bool inStr = false, esc = false;
+        for (size_t i = openBr; i < content.size(); ++i) {
+            char c = content[i];
+            if (esc) { esc = false; continue; }
+            if (c == '\\') { esc = true; continue; }
+            if (c == '"') { inStr = !inStr; continue; }
+            if (!inStr) {
+                if (c == '[') ++depth;
+                else if (c == ']') {
+                    --depth;
+                    if (depth == 0) { closeBr = i; break; }
+                }
+            }
+        }
+        if (closeBr == std::string::npos) return false;
+
+        std::string arrBody = content.substr(openBr + 1, closeBr - openBr - 1);
+        std::vector<LearnedChoreoEntry> parsed;
+        size_t pos = 0;
+        while (pos < arrBody.size()) {
+            size_t ob = arrBody.find('{', pos);
+            if (ob == std::string::npos) break;
+            size_t cb = arrBody.find('}', ob);
+            if (cb == std::string::npos) break;
+            std::string obj = arrBody.substr(ob, cb - ob + 1);
+            pos = cb + 1;
+
+            auto extractStr = [&](const std::string& k) -> std::string {
+                size_t kp = obj.find("\"" + k + "\"");
+                if (kp == std::string::npos) return "";
+                size_t col = obj.find(':', kp);
+                if (col == std::string::npos) return "";
+                size_t q1 = obj.find('"', col + 1);
+                if (q1 == std::string::npos) return "";
+                std::string out;
+                for (size_t qi = q1 + 1; qi < obj.size(); ++qi) {
+                    if (obj[qi] == '\\' && qi + 1 < obj.size()) { out += obj[++qi]; continue; }
+                    if (obj[qi] == '"') break;
+                    out += obj[qi];
+                }
+                return out;
+            };
+            auto extractNum = [&](const std::string& k, float defVal) -> float {
+                size_t kp = obj.find("\"" + k + "\"");
+                if (kp == std::string::npos) return defVal;
+                size_t col = obj.find(':', kp);
+                if (col == std::string::npos) return defVal;
+                try { return std::stof(obj.substr(col + 1)); } catch (...) { return defVal; }
+            };
+
+            LearnedChoreoEntry entry;
+            entry.name = extractStr("name");
+            const std::string pfx = "Live Video Choreo: ";
+            if (entry.name.rfind(pfx, 0) == 0) {
+                entry.name = entry.name.substr(pfx.size());
+            }
+            entry.bpm = extractNum("bpm", 128.0f);
+            entry.hipSway = extractNum("hipSway", 1.25f);
+            entry.armWave = extractNum("armWave", 1.25f);
+            if (!entry.name.empty()) {
+                parsed.push_back(entry);
+            }
+        }
+
+        if (parsed.empty()) return false;
+        size_t prevSize = aionLearnedChoreos.size();
+        aionLearnedChoreos = std::move(parsed);
+        if (!wasInitialized || aionLearnedChoreos.size() != prevSize || activeLearnedChoreoIdx < 0) {
+            activeLearnedChoreoIdx = static_cast<int>(aionLearnedChoreos.size()) - 1;
+        } else if (activeLearnedChoreoIdx >= static_cast<int>(aionLearnedChoreos.size())) {
+            activeLearnedChoreoIdx = static_cast<int>(aionLearnedChoreos.size()) - 1;
+        }
+        ApplyActiveLearnedChoreo(true);
+        return true;
+    }
+
     uint64_t animFrameCounter = 0;
     float meovvChoreoClock = 0.0f;
     bool meovvStageChoreoActive = true;
 
     void UpdateAnimations(float dt, SurrealWorld* world = nullptr, const Frustum* camFrustum = nullptr, const Vec3* camPos = nullptr) {
         ++animFrameCounter;
-        meovvChoreoClock += dt;
+        float tempoScale = std::clamp(activeStageBPM / 128.0f, 0.65f, 1.60f);
+        meovvChoreoClock += dt * tempoScale;
         size_t idx = 0;
         for (auto& pair : animatedEntities) {
             auto& skel = pair.second;
@@ -1116,8 +1266,9 @@ public:
                             dYaw = std::sin(t * 2.4f + phase) * 0.16f;
                         }
 
-                        itTr->second.position = edPtr->position + Vec3(dx, dy, dz);
-                        itTr->second.rotation = Quat::FromAxisAngle(Vec3(0, 1.0f, 0), edPtr->yaw + dYaw);
+                        float swayAmp = std::clamp(activeChoreoHipMult, 0.75f, 1.55f);
+                        itTr->second.position = edPtr->position + Vec3(dx * swayAmp, dy * swayAmp, dz * swayAmp);
+                        itTr->second.rotation = Quat::FromAxisAngle(Vec3(0, 1.0f, 0), edPtr->yaw + dYaw * swayAmp);
                     } else {
                         itTr->second.position = edPtr->position;
                         itTr->second.rotation = Quat::FromAxisAngle(Vec3(0, 1.0f, 0), edPtr->yaw);

@@ -96,6 +96,7 @@ public:
     float wetness = 0.85f;
     float glowIntensity = 1.30f;
     float beatPulse = 0.0f;
+    float activeBPM = 128.0f; // Synchronized live with Dojo Choreo-Memory-Link BPM
     int shaderQuality = 1; // 0 = Fast (30-60+ FPS), 1 = Balanced, 2 = Ultra
 
     // Sky Dome Uniform Locations
@@ -306,8 +307,11 @@ public:
             glUniform1f(uTimeLoc, timeSec);
         }
         if (uBeatPulseLoc != -1) {
-            // 128 BPM (2.133 Hz) K-Pop rhythmic pulse envelope
-            beatPulse = 0.5f + 0.5f * std::sin(timeSec * 13.404f);
+            // Dynamic BPM rhythmic pulse envelope synchronized with Dojo dancers & Aion Choreo-Memory-Link
+            float bpmClamped = std::max(60.0f, std::min(220.0f, activeBPM));
+            float beatFreqRad = (bpmClamped / 60.0f) * 6.2831853f;
+            float rawWave = 0.5f + 0.5f * std::sin(timeSec * beatFreqRad);
+            beatPulse = std::pow(rawWave, 1.8f);
             glUniform1f(uBeatPulseLoc, beatPulse);
         }
         if (uLightSpaceMatrixLoc != -1) {
@@ -915,8 +919,8 @@ void main() {
         puddleReflection = skyReflect * waterFresnel * puddle;
     }
 
-    // 6. Emissive Radiant Glow (Windows, Shop signs, Neon billboards, Street lamp bulbs + 128 BPM Beat Resonance)
-    float beatBoost = 1.0 + 0.14 * clamp(uBeatPulse, 0.0, 1.0);
+    // 6. Emissive Radiant Glow (Windows, Shop signs, Neon billboards, Street lamp bulbs + Live BPM Beat Resonance)
+    float beatBoost = 1.0 + 0.24 * clamp(uBeatPulse, 0.0, 1.0);
     vec3 emissiveLight = uEmissive * uGlowIntensity * beatBoost;
     if (uHasTexture == 1 && length(uEmissive) > 0.01) {
         // Multiplies the colorful storefront / neon texture content
