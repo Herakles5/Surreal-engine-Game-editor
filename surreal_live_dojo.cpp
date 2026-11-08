@@ -25,14 +25,8 @@
 #include <fstream>
 #include <functional>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <omp.h>
-
-// Prevent GNU libgomp worker threads from active-spinning at ~300% CPU between skeletal frames
-__attribute__((constructor(101)))
-static void ConfigureLowSpinOpenMP() {
-    setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
-    setenv("GOMP_SPINCOUNT", "0", 0);
-}
 
 // --- NATIVE LINUX POPUP STATE & IPC ---
 static std::atomic<bool> g_imagePickerRunning(false);
@@ -355,6 +349,15 @@ static bool SetPlayerAvatar(
 }
 
 int main(int argc, char* argv[]) {
+    // Ensure OMP_WAIT_POLICY=PASSIVE & GOMP_SPINCOUNT=0 are in envp BEFORE ld.so initializes libgomp.so.1
+    const char* ompPolicy = getenv("OMP_WAIT_POLICY");
+    const char* gompSpin = getenv("GOMP_SPINCOUNT");
+    if (!ompPolicy || std::string(ompPolicy) != "PASSIVE" || !gompSpin || std::string(gompSpin) != "0") {
+        setenv("OMP_WAIT_POLICY", "PASSIVE", 1);
+        setenv("GOMP_SPINCOUNT", "0", 1);
+        execv("/proc/self/exe", argv);
+    }
+
     bool headless = false;
     bool startInEditor = false;
     bool startFullscreen = false;
@@ -838,7 +841,7 @@ int main(int argc, char* argv[]) {
     std::cout << "    [+] / [-]    : Scale Entity (Edit Mode)\n";
     std::cout << "    [C] / [M]    : Cycle Color / Metallic (Edit Mode)\n";
     std::cout << "    [K]          : Spawn New Platform (Edit Mode)\n";
-    std::cout << "    [DEL]        : Delete Entity (Edit Mode)\n";
+    std::cout << "    [DEL]        : Delete Entity (Edit Mode)\n" << std::flush;
 
     // Initial sync with Aion's persistent Choreo-Memory-Link
     if (editor.SyncAionChoreoMemory()) {
