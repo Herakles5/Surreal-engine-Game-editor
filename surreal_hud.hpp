@@ -390,7 +390,7 @@ public:
         // Controls hint
         DrawString(fb, screenW, screenH, panelX + 12, panelY + 172, "[SPACE] Jump | [WASD] Run | [Q/E] Cam Orbit", 0xFF00FFCC, 1);
         DrawString(fb, screenW, screenH, panelX + 12, panelY + 186, "[N] Sky | [E] Duet | [T] Swap Character | [C] AI Mode", 0xFF00E5FF, 1);
-        DrawString(fb, screenW, screenH, panelX + 12, panelY + 200, "[V] Cycle Dancer | [P] Pause | [B] Bench | [G] GM Console", 0xFFFFAA00, 1);
+        DrawString(fb, screenW, screenH, panelX + 12, panelY + 200, "[V] Dancer | [L] Choreo-Link | [P] Pause | [B] Bench | [G] GM", 0xFFFFAA00, 1);
 
         // 2. Active Benchmark Progress Banner (Positioned cleanly below top bar)
         if (isBenchmarkRunning) {

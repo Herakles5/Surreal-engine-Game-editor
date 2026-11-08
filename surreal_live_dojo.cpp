@@ -25,6 +25,14 @@
 #include <fstream>
 #include <functional>
 #include <sys/stat.h>
+#include <omp.h>
+
+// Prevent GNU libgomp worker threads from active-spinning at ~300% CPU between skeletal frames
+__attribute__((constructor(101)))
+static void ConfigureLowSpinOpenMP() {
+    setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
+    setenv("GOMP_SPINCOUNT", "0", 0);
+}
 
 // --- NATIVE LINUX POPUP STATE & IPC ---
 static std::atomic<bool> g_imagePickerRunning(false);
@@ -104,6 +112,9 @@ static void SyncRuntimeSettings(
     struct stat st;
     static int frameCounter = 0;
     frameCounter++;
+    if (frameCounter > 1 && (frameCounter % 15) != 0) {
+        return;
+    }
 
     auto writeSettings = [&](const std::string& action = "") {
         FILE* fp = fopen(path, "w");
@@ -373,6 +384,9 @@ int main(int argc, char* argv[]) {
             startInEditor = true;
         }
     }
+
+    // Cap OpenMP worker pool to physical efficiency sweet spot (prevents thread-barrier contention)
+    omp_set_num_threads(std::min(4, std::max(2, omp_get_num_procs() / 2)));
 
     std::cout << "=========================================================\n";
     std::cout << "  AION SURREAL 3D ENGINE - 3D GAME STUDIO & LIVE DOJO\n";
@@ -817,6 +831,8 @@ int main(int argc, char* argv[]) {
     std::cout << "    [F6] / [F7]  : Save / Load Level JSON\n";
     std::cout << "    [SPACE]      : Character Jump (Play Mode)\n";
     std::cout << "    [WASD]       : Run / Fly Move\n";
+    std::cout << "    [E] / [M]    : Dance Duet / Cycle MEOVV Choreo\n";
+    std::cout << "    [L]          : Cycle Aion Learned Video Choreos (BPM + Spotlight Sync)\n";
     std::cout << "    [N] / [P]    : Select Next / Prev Entity (Edit Mode)\n";
     std::cout << "    [IJKL / UO]  : Transform Move Entity (Edit Mode)\n";
     std::cout << "    [+] / [-]    : Scale Entity (Edit Mode)\n";
@@ -824,13 +840,28 @@ int main(int argc, char* argv[]) {
     std::cout << "    [K]          : Spawn New Platform (Edit Mode)\n";
     std::cout << "    [DEL]        : Delete Entity (Edit Mode)\n";
 
+    // Initial sync with Aion's persistent Choreo-Memory-Link
+    if (editor.SyncAionChoreoMemory()) {
+        character.playbackSpeed = std::clamp(editor.activeStageBPM / 125.0f, 0.65f, 1.65f);
+        hybridRenderer.activeBPM = editor.activeStageBPM;
+    }
+
     float totalAppTime = 0.0f;
     while (running) {
-        auto currentTime = std::chrono::high_resolution_clock::now();
+        auto frameLoopStart = std::chrono::high_resolution_clock::now();
+        auto currentTime = frameLoopStart;
         float dt = std::chrono::duration<float>(currentTime - lastTime).count();
         lastTime = currentTime;
         dt = std::min(dt, 0.05f);
         totalAppTime += dt;
+
+        // Live-watch /root/coding/AI_Desktop/aion_minime_memory.json every ~90 frames (~1.5s)
+        if ((totalFramesRendered % 90) == 0) {
+            if (editor.SyncAionChoreoMemory()) {
+                character.playbackSpeed = std::clamp(editor.activeStageBPM / 125.0f, 0.65f, 1.65f);
+            }
+        }
+        hybridRenderer.activeBPM = editor.activeStageBPM;
 
         editor.Update(dt);
         aionLink.Update(dt, currentFps, engine.lastFrameTimeMs, editor.entities.size(),
@@ -846,10 +877,10 @@ int main(int argc, char* argv[]) {
                             shadowsEnabled, shadowOpacity, sunIntensityMult, ambientIntensityMult,
                             pointLightLimit, currentFps, editor);
 
-        // Process high-precision 3D Model Generator requests (/tmp/surreal_generator_request.json)
+        // Process high-precision 3D Model Generator requests (/tmp/surreal_generator_request.json) (~4 Hz check)
         const char* reqPath = "/tmp/surreal_generator_request.json";
         struct stat reqStat;
-        if (stat(reqPath, &reqStat) == 0) {
+        if ((totalFramesRendered % 15) == 0 && stat(reqPath, &reqStat) == 0) {
             std::ifstream reqFile(reqPath);
             if (reqFile.is_open()) {
                 std::string reqContent((std::istreambuf_iterator<char>(reqFile)), std::istreambuf_iterator<char>());
@@ -1049,6 +1080,11 @@ int main(int argc, char* argv[]) {
                             }
                             case SDLK_m:
                                 editor.CycleAllMeovvAnimations();
+                                break;
+                            case SDLK_l:
+                                editor.CycleAionLearnedChoreo();
+                                character.playbackSpeed = std::clamp(editor.activeStageBPM / 125.0f, 0.65f, 1.65f);
+                                hybridRenderer.activeBPM = editor.activeStageBPM;
                                 break;
                             case SDLK_h:
                                 showSkeletonDebug = !showSkeletonDebug;
@@ -1710,21 +1746,55 @@ int main(int argc, char* argv[]) {
             hybridRenderer.BeginFrame(curSky.horizonColor);
 
             std::vector<Surreal::PointLight> activePointLights;
+            // BPM-Synchronized Concert Stage Spotlights (pulsing & sweeping in lockstep with Dojo BPM!)
+            float stageBPM = std::clamp(editor.activeStageBPM, 60.0f, 220.0f);
+            float beatRad = totalAppTime * (stageBPM / 60.0f) * 6.2831853f;
+            float beatKick = std::pow(0.5f + 0.5f * std::sin(beatRad), 2.0f);
+            float counterKick = std::pow(0.5f + 0.5f * std::sin(beatRad + 3.1415926f), 2.0f);
+            float sweepX = std::sin(beatRad * 0.25f) * 2.2f;
+            float sweepZ = std::cos(beatRad * 0.25f) * 0.9f;
+
             if (curSky.isNight) {
-                // Street lamps along the boulevard (warm sodium & neon)
-                activePointLights.push_back({Surreal::Vec3(0.0f, 4.6f, 2.2f), Surreal::ColorRGB(3.2f, 2.4f, 1.4f), 1.0f, 24.0f});
-                activePointLights.push_back({Surreal::Vec3(-9.3f, 4.6f, 7.8f), Surreal::ColorRGB(3.0f, 2.3f, 1.4f), 1.0f, 24.0f});
-                activePointLights.push_back({Surreal::Vec3(16.5f, 4.6f, 2.2f), Surreal::ColorRGB(3.0f, 2.3f, 1.4f), 1.0f, 24.0f});
-                activePointLights.push_back({Surreal::Vec3(-16.5f, 4.6f, 2.2f), Surreal::ColorRGB(1.6f, 2.6f, 3.8f), 1.0f, 22.0f}); // Cyan neon lamp
-                activePointLights.push_back({Surreal::Vec3(8.9f, 4.6f, 7.8f), Surreal::ColorRGB(3.4f, 1.5f, 2.8f), 1.0f, 22.0f});  // Magenta arcade neon
-                activePointLights.push_back({Surreal::Vec3(-26.5f, 4.6f, 7.8f), Surreal::ColorRGB(3.0f, 2.3f, 1.4f), 1.0f, 24.0f});
-                activePointLights.push_back({Surreal::Vec3(4.2f, 6.2f, -3.8f), Surreal::ColorRGB(2.6f, 1.4f, 3.5f), 1.0f, 25.0f}); // Church cross neon
-                // Avatar personal flashlight / aura fill
-                activePointLights.push_back({Surreal::Vec3(charPos.x, charPos.y + 1.6f, charPos.z + 0.3f), Surreal::ColorRGB(1.4f, 1.6f, 2.0f), 1.0f, 9.5f});
+                // 1-2: Twin BPM-Synced Stage Spotlights sweeping across the MEOVV & Avatar dance plaza
+                activePointLights.push_back({
+                    Surreal::Vec3(-2.6f + sweepX, 4.8f, 4.2f + sweepZ),
+                    Surreal::ColorRGB(0.9f + 2.8f * beatKick, 2.2f + 1.4f * counterKick, 3.8f),
+                    0.85f + 0.75f * beatKick, 22.0f
+                });
+                activePointLights.push_back({
+                    Surreal::Vec3(2.6f - sweepX, 4.8f, 4.2f - sweepZ),
+                    Surreal::ColorRGB(3.8f, 0.9f + 1.8f * beatKick, 2.6f + 1.2f * counterKick),
+                    0.85f + 0.75f * counterKick, 22.0f
+                });
+                // 3-7: Street lamps along the boulevard (warm sodium & neon subtly modulated by beat)
+                float streetPulse = 0.92f + 0.22f * beatKick;
+                activePointLights.push_back({Surreal::Vec3(0.0f, 4.6f, 2.2f), Surreal::ColorRGB(3.2f, 2.4f, 1.4f), streetPulse, 24.0f});
+                activePointLights.push_back({Surreal::Vec3(-9.3f, 4.6f, 7.8f), Surreal::ColorRGB(3.0f, 2.3f, 1.4f), streetPulse, 24.0f});
+                activePointLights.push_back({Surreal::Vec3(16.5f, 4.6f, 2.2f), Surreal::ColorRGB(1.6f, 2.6f, 3.8f), streetPulse, 22.0f});
+                activePointLights.push_back({Surreal::Vec3(8.9f, 4.6f, 7.8f), Surreal::ColorRGB(3.4f, 1.5f, 2.8f), streetPulse, 22.0f});
+                activePointLights.push_back({Surreal::Vec3(4.2f, 6.2f, -3.8f), Surreal::ColorRGB(2.6f, 1.4f, 3.5f), streetPulse, 25.0f});
+                // 8: Avatar personal aura spotlight synchronized to heart of the beat
+                activePointLights.push_back({
+                    Surreal::Vec3(charPos.x, charPos.y + 1.65f, charPos.z + 0.35f),
+                    Surreal::ColorRGB(1.3f + 0.8f * beatKick, 1.6f, 2.2f + 0.6f * counterKick),
+                    0.90f + 0.45f * beatKick, 10.5f
+                });
 
                 if ((int)activePointLights.size() > pointLightLimit) {
                     activePointLights.resize(std::max(0, pointLightLimit));
                 }
+            } else if (pointLightLimit >= 2) {
+                // Subtle BPM-synced stage rim spotlights during Sunset / Dawn / Day
+                activePointLights.push_back({
+                    Surreal::Vec3(-2.4f + sweepX, 4.5f, 4.2f),
+                    Surreal::ColorRGB(1.2f, 2.2f, 3.2f),
+                    0.45f + 0.50f * beatKick, 18.0f
+                });
+                activePointLights.push_back({
+                    Surreal::Vec3(2.4f - sweepX, 4.5f, 4.2f),
+                    Surreal::ColorRGB(3.2f, 1.2f, 2.4f),
+                    0.45f + 0.50f * counterKick, 18.0f
+                });
             }
 
             hybridRenderer.SetGlobalUniforms(
@@ -2175,6 +2245,16 @@ int main(int argc, char* argv[]) {
 
         if (headless && totalFramesRendered >= 30) {
             running = false;
+        }
+
+        // Precision 60 FPS frame-pacer when interactive & not benchmarking:
+        // eliminates busy-loop CPU burn on X11 PRIME Render Offload while preserving 60 FPS fluidity
+        if (!headless && !isBenchmarkRunning) {
+            constexpr auto TARGET_FRAME_DUR = std::chrono::microseconds(16400); // ~61.0 FPS cap
+            auto frameElapsed = std::chrono::high_resolution_clock::now() - frameLoopStart;
+            if (frameElapsed < TARGET_FRAME_DUR) {
+                std::this_thread::sleep_for(TARGET_FRAME_DUR - frameElapsed);
+            }
         }
     }
 
