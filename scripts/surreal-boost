@@ -15,11 +15,11 @@
 
 ENABLE_VKBASALT_OPT=0
 ENABLE_HUD=1
-FPS_CAP=""
+FPS_CAP="60"
 LAYER_AF="16"
 LAYER_LOD=""
 LAYER_SCALE="0.67"
-LAYER_FILTER=""
+LAYER_FILTER="linear"
 LAYER_SHARPEN="0.55"
 LAYER_LOG=0
 LAYER_SO="/usr/lib/surreal-boost/libVkLayer_surreal_boost.so"
@@ -75,6 +75,22 @@ while [ $# -gt 0 ]; do
             ;;
         --log)
             LAYER_LOG=1
+            shift
+            ;;
+        --no-scale|--native)
+            LAYER_SCALE="1.00"
+            shift
+            ;;
+        --no-sharpen)
+            LAYER_SHARPEN="0.00"
+            shift
+            ;;
+        --no-af)
+            LAYER_AF="0"
+            shift
+            ;;
+        --no-fps|--unlimited)
+            FPS_CAP="0"
             shift
             ;;
         --fps|--limit)
@@ -175,6 +191,8 @@ if [ -e "/sys/bus/pci/drivers/nvidia/0000:01:00.0" ]; then
     export DXVK_FILTER_DEVICE_NAME="NVIDIA GeForce GTX 1060"
     export VKD3D_FILTER_DEVICE_NAME="NVIDIA GeForce GTX 1060"
     export DRI_PRIME=1
+    # Expose NVML to Steam container (pressure-vessel) so MangoHud reads GPU load, VRAM & temp:
+    export PRESSURE_VESSEL_FILESYSTEMS_RO="${PRESSURE_VESSEL_FILESYSTEMS_RO:+$PRESSURE_VESSEL_FILESYSTEMS_RO:}/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/i386-linux-gnu/libnvidia-ml.so.1:/usr/bin/nvidia-smi"
 fi
 
 # ------------------------------------------------------------------------------
@@ -192,8 +210,9 @@ export DXVK_STATE_CACHE=1
 export DXVK_STATE_CACHE_PATH="/root/.cache/surreal_dxvk_cache"
 export DXVK_LOG_LEVEL=none
 if [ -z "${VKD3D_CONFIG:-}" ]; then
-    export VKD3D_CONFIG="no_upload_hvv"
+    export VKD3D_CONFIG="nodxr,single_queue,no_upload_hvv,global_pipeline_cache"
 fi
+export VKD3D_FEATURE_LEVEL="12_0"
 
 export PROTON_USE_FSYNC=1
 export PROTON_FORCE_LARGE_ADDRESS_AWARE=1
@@ -242,7 +261,7 @@ export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-512/48000}"
 log_boost "Launching: $* (SCALE=${LAYER_SCALE:-1.0} SHARPEN=${LAYER_SHARPEN:-auto} HUD=$ENABLE_HUD FPS_CAP=${FPS_CAP:-none} COMPAT=${STEAM_COMPAT_DATA_PATH:-native})"
 
 if command -v ionice >/dev/null 2>&1; then
-    exec ionice -c 2 -n 0 nice -n -5 "$@"
+    exec ionice -c 2 -n 0 nice -n -10 "$@"
 else
-    exec nice -n -5 "$@"
+    exec nice -n -10 "$@"
 fi
