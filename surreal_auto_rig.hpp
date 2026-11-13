@@ -99,21 +99,16 @@ public:
     {
         std::vector<RiggedFigureEntity> result;
 
+        std::string resolvedGroupPath = surreal::paths::DefaultRigGroupImage(imagePath);
         int imgW = 0, imgH = 0, ch = 0;
-        unsigned char* rgba = stbi_load(imagePath.c_str(), &imgW, &imgH, &ch, 4);
+        unsigned char* rgba = stbi_load(resolvedGroupPath.c_str(), &imgW, &imgH, &ch, 4);
         if (!rgba || imgW < 16 || imgH < 16) {
             if (rgba) stbi_image_free(rgba);
-            // Fallback search paths for MEOVV group photo
-            const char* fallbacks[] = {
-                "/root/Downloads/meovv_nobg.png",
-                "/root/Downloads/meovv.jpg",
-                "assets/models/meovv.jpg"
-            };
-            for (const char* fb : fallbacks) {
-                if (imagePath != fb) {
-                    rgba = stbi_load(fb, &imgW, &imgH, &ch, 4);
-                    if (rgba && imgW >= 16 && imgH >= 16) break;
-                }
+            std::string fb = surreal::paths::DefaultRigGroupImage();
+            if (fb != resolvedGroupPath) {
+                rgba = stbi_load(fb.c_str(), &imgW, &imgH, &ch, 4);
+            } else {
+                rgba = nullptr;
             }
         }
 
@@ -125,21 +120,21 @@ public:
 
         struct MemberDef {
             std::string name;
-            std::string singlePngA;
-            std::string singlePngB;
+            std::string filename;
             float normMin;
             float normMax;
         };
 
         std::vector<MemberDef> members = {
-            {"MEOVV_1_Ella",  "/root/Downloads/meovv_1_ella.png",  "/root/coding/MeinOS/surreal_engine/meovv_1_ella.png",  0.070f, 0.275f},
-            {"MEOVV_2_Gawon", "/root/Downloads/meovv_2_gawon.png", "/root/coding/MeinOS/surreal_engine/meovv_2_gawon.png", 0.275f, 0.405f},
-            {"MEOVV_3_Sooin", "/root/Downloads/meovv_3_sooin.png", "/root/coding/MeinOS/surreal_engine/meovv_3_sooin.png", 0.405f, 0.545f},
-            {"MEOVV_4_Anna",  "/root/Downloads/meovv_4_anna.png",  "/root/coding/MeinOS/surreal_engine/meovv_4_anna.png",  0.545f, 0.665f},
-            {"MEOVV_5_Narin", "/root/Downloads/meovv_5_narin.png", "/root/coding/MeinOS/surreal_engine/meovv_5_narin.png", 0.665f, 0.835f}
+            {"MEOVV_1_Ella",  "meovv_1_ella.png",  0.070f, 0.275f},
+            {"MEOVV_2_Gawon", "meovv_2_gawon.png", 0.275f, 0.405f},
+            {"MEOVV_3_Sooin", "meovv_3_sooin.png", 0.405f, 0.545f},
+            {"MEOVV_4_Anna",  "meovv_4_anna.png",  0.545f, 0.665f},
+            {"MEOVV_5_Narin", "meovv_5_narin.png", 0.665f, 0.835f}
         };
 
         float targetH = (opt.heightMeters > 0.5f) ? opt.heightMeters : 2.20f;
+        const char* homeEnv = std::getenv("HOME");
 
         for (size_t figIdx = 0; figIdx < members.size(); ++figIdx) {
             const auto& def = members[figIdx];
@@ -150,10 +145,12 @@ public:
 
             RiggedFigureEntity fig;
             int mW = 0, mH = 0, mCh = 0;
-            unsigned char* mRgba = stbi_load(def.singlePngA.c_str(), &mW, &mH, &mCh, 4);
-            if (!mRgba || mW < 16 || mH < 16) {
+            std::string candidatePath = surreal::paths::ResolvePath(def.filename);
+            unsigned char* mRgba = stbi_load(candidatePath.c_str(), &mW, &mH, &mCh, 4);
+            if ((!mRgba || mW < 16 || mH < 16) && homeEnv) {
                 if (mRgba) stbi_image_free(mRgba);
-                mRgba = stbi_load(def.singlePngB.c_str(), &mW, &mH, &mCh, 4);
+                std::string dlPath = std::string(homeEnv) + "/Downloads/" + def.filename;
+                mRgba = stbi_load(dlPath.c_str(), &mW, &mH, &mCh, 4);
             }
             if (mRgba && mW >= 16 && mH >= 16) {
                 fig = BuildRubberSuitFromSubImage(

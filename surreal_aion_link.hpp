@@ -43,6 +43,9 @@ public:
     bool enabled = true;
     bool connected = false;
     bool IsConnecting() const { return connecting; }
+    std::string unixSocketPath;
+    std::string tcpHost = "127.0.0.1";
+    uint16_t tcpPort = 9099;
     int generation = 0;
     int rulesCount = 0;
     int focalAxiomsCount = 16;
@@ -265,23 +268,29 @@ private:
             return -1;
         };
 
-        sockaddr_un addr;
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sun_family = AF_UNIX;
         const char* envPath = std::getenv("AION_NEXUS_SOCK"); // override for tests / custom setups
-        std::strncpy(addr.sun_path, envPath ? envPath : "/tmp/aion_nexus.sock", sizeof(addr.sun_path) - 1);
-        int unixRc = tryNonBlockingConnect(AF_UNIX, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-        if (unixRc == 1) return true;
-        if (unixRc == 0) return false;
+        std::string sockTarget = !unixSocketPath.empty() ? unixSocketPath : (envPath ? envPath : "/tmp/aion_nexus.sock");
+        if (sockTarget != "none") {
+            sockaddr_un addr;
+            std::memset(&addr, 0, sizeof(addr));
+            addr.sun_family = AF_UNIX;
+            std::strncpy(addr.sun_path, sockTarget.c_str(), sizeof(addr.sun_path) - 1);
+            int unixRc = tryNonBlockingConnect(AF_UNIX, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+            if (unixRc == 1) return true;
+            if (unixRc == 0) return false;
+        }
 
         // TCP fallback (non-blocking)
-        sockaddr_in in;
-        std::memset(&in, 0, sizeof(in));
-        in.sin_family = AF_INET;
-        in.sin_port = htons(9099);
-        inet_pton(AF_INET, "127.0.0.1", &in.sin_addr);
-        int tcpRc = tryNonBlockingConnect(AF_INET, reinterpret_cast<sockaddr*>(&in), sizeof(in));
-        return tcpRc == 1;
+        if (tcpPort > 0) {
+            sockaddr_in in;
+            std::memset(&in, 0, sizeof(in));
+            in.sin_family = AF_INET;
+            in.sin_port = htons(tcpPort);
+            inet_pton(AF_INET, tcpHost.c_str(), &in.sin_addr);
+            int tcpRc = tryNonBlockingConnect(AF_INET, reinterpret_cast<sockaddr*>(&in), sizeof(in));
+            return tcpRc == 1;
+        }
+        return false;
 #else
         return false;
 #endif
