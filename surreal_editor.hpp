@@ -81,16 +81,10 @@ public:
     float placementMetallic;
     float placementRoughness;
     std::string placementName;
+    std::string placementAssetPath;
 
-    // 3D Model Folder Browser
-    std::vector<std::string> modelFolders = {
-        "/root/coding/Surreal-engine-Game-editor/assets/models",
-        "/root/coding/MeinOS/surreal_engine/assets/models",
-        "assets/models",
-        "/opt/meinos",
-        "assets/custom_models",
-        "/root/Downloads"
-    };
+    // 3D Model Folder Browser (portable search paths)
+    std::vector<std::string> modelFolders;
     int activeFolderIndex = 0;
     std::vector<DiscoveredModelFile> folderModels;
 
@@ -107,6 +101,167 @@ public:
     // Placed skeletal animated entities (NPC dancers in the world)
     std::shared_ptr<SkeletalMeshInstance> placementSkeletal;
     std::unordered_map<EntityID, std::shared_ptr<SkeletalMeshInstance>> animatedEntities;
+
+    // Optional hook invoked when a SurrealMesh is no longer referenced by any world entity
+    std::function<void(const std::shared_ptr<SurrealMesh>&)> onMeshEvicted;
+
+    // Undo / Redo History Stack
+    struct SnapshotEntityRecord {
+        EditableEntity ed;
+        TransformComponent transform;
+        bool hasTransform = false;
+        MeshRendererComponent meshRenderer;
+        bool hasMeshRenderer = false;
+        std::shared_ptr<SkeletalMeshInstance> skeletal;
+    };
+    struct EditorSnapshot {
+        std::vector<SnapshotEntityRecord> records;
+        int selectedIndex = -1;
+        std::string label;
+    };
+    static constexpr size_t MAX_UNDO_HISTORY = 32;
+    std::vector<EditorSnapshot> undoStack;
+    std::vector<EditorSnapshot> redoStack;
+    float editorClock = 0.0f;
+    float lastUndoTimestamp = -10.0f;
+    std::string lastUndoCoalesceKey;
+
+    void EvictMeshIfUnreferenced(const std::shared_ptr<SurrealMesh>& mesh, const SurrealWorld& world) {
+        if (!mesh || !onMeshEvicted) return;
+        if (placementMesh == mesh) return;
+        for (const auto& kv : world.meshRenderers) {
+            if (kv.second.mesh == mesh) return;
+        }
+        onMeshEvicted(mesh);
+    }
+
+    EditorSnapshot CaptureSnapshot(const SurrealWorld& world, const std::string& label = "") const {
+        EditorSnapshot snap;
+        snap.selectedIndex = selectedIndex;
+        snap.label = label;
+        snap.records.reserve(entities.size());
+        for (const auto& e : entities) {
+            SnapshotEntityRecord rec;
+            rec.ed = e;
+            auto itTr = world.transforms.find(e.id);
+            if (itTr != world.transforms.end()) {
+                rec.transform = itTr->second;
+                rec.hasTransform = true;
+            }
+            auto itMr = world.meshRenderers.find(e.id);
+            if (itMr != world.meshRenderers.end()) {
+                rec.meshRenderer = itMr->second;
+                rec.hasMeshRenderer = true;
+            }
+            auto itAnim = animatedEntities.find(e.id);
+            if (itAnim != animatedEntities.end()) {
+                rec.skeletal = itAnim->second;
+            }
+            snap.records.push_back(std::move(rec));
+        }
+        return snap;
+    }
+
+    void PushUndoSnapshot(const SurrealWorld& world, const std::string& label, const std::string& coalesceKey = "") {
+        if (!coalesceKey.empty() && coalesceKey == lastUndoCoalesceKey &&
+            (editorClock - lastUndoTimestamp) < 0.45f) {
+            redoStack.clear();
+            lastUndoTimestamp = editorClock;
+            return;
+        }
+        undoStack.push_back(CaptureSnapshot(world, label));
+        if (undoStack.size() > MAX_UNDO_HISTORY) {
+            undoStack.erase(undoStack.begin());
+        }
+        redoStack.clear();
+        lastUndoTimestamp = editorClock;
+        lastUndoCoalesceKey = coalesceKey;
+    }
+
+    void RestoreSnapshot(const EditorSnapshot& snap, SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
+        std::vector<std::shared_ptr<SurrealMesh>> previousMeshes;
+        std::unordered_map<EntityID, bool> keepIds;
+        for (const auto& rec : snap.records) {
+            keepIds[rec.ed.id] = true;
+        }
+        for (const auto& e : entities) {
+            auto itMr = world.meshRenderers.find(e.id);
+            if (itMr != world.meshRenderers.end() && itMr->second.mesh) {
+                previousMeshes.push_back(itMr->second.mesh);
+            }
+            if (keepIds.find(e.id) == keepIds.end()) {
+                animatedEntities.erase(e.id);
+                world.DestroyEntity(e.id);
+            }
+        }
+
+        entities.clear();
+        entities.reserve(snap.records.size());
+        for (const auto& rec : snap.records) {
+            world.RestoreEntity(rec.ed.id, rec.ed.name);
+            if (rec.hasTransform) {
+                world.transforms[rec.ed.id] = rec.transform;
+            }
+            if (rec.hasMeshRenderer) {
+                world.meshRenderers[rec.ed.id] = rec.meshRenderer;
+            } else {
+                world.meshRenderers.erase(rec.ed.id);
+            }
+            if (rec.skeletal) {
+                animatedEntities[rec.ed.id] = rec.skeletal;
+            } else {
+                animatedEntities.erase(rec.ed.id);
+            }
+            entities.push_back(rec.ed);
+        }
+
+        if (entities.empty()) {
+            selectedIndex = -1;
+        } else {
+            selectedIndex = std::clamp(snap.selectedIndex, 0, static_cast<int>(entities.size()) - 1);
+        }
+
+        for (const auto& oldMesh : previousMeshes) {
+            EvictMeshIfUnreferenced(oldMesh, world);
+        }
+        SyncObstacles(obstacles, &world);
+    }
+
+    bool Undo(SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
+        if (undoStack.empty()) {
+            SetStatus("[!] Nothing to Undo [Ctrl+Z]", 2.0f);
+            return false;
+        }
+        EditorSnapshot current = CaptureSnapshot(world, "Redo");
+        EditorSnapshot target = std::move(undoStack.back());
+        undoStack.pop_back();
+        redoStack.push_back(std::move(current));
+        if (redoStack.size() > MAX_UNDO_HISTORY) {
+            redoStack.erase(redoStack.begin());
+        }
+        lastUndoCoalesceKey.clear();
+        RestoreSnapshot(target, world, obstacles);
+        SetStatus("[↶ UNDO] " + (target.label.empty() ? std::string("Restored state") : target.label), 3.0f);
+        return true;
+    }
+
+    bool Redo(SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
+        if (redoStack.empty()) {
+            SetStatus("[!] Nothing to Redo [Ctrl+Y]", 2.0f);
+            return false;
+        }
+        EditorSnapshot current = CaptureSnapshot(world, "Undo");
+        EditorSnapshot target = std::move(redoStack.back());
+        redoStack.pop_back();
+        undoStack.push_back(std::move(current));
+        if (undoStack.size() > MAX_UNDO_HISTORY) {
+            undoStack.erase(undoStack.begin());
+        }
+        lastUndoCoalesceKey.clear();
+        RestoreSnapshot(target, world, obstacles);
+        SetStatus("[↷ REDO] Restored change", 3.0f);
+        return true;
+    }
 
     // Bare-Metal TopBar Buttons
     struct TopBarButton {
@@ -162,7 +317,18 @@ public:
           placementMetallic(0.4f),
           placementRoughness(0.35f),
           placementName("New_Model"),
-          currentPaletteIdx(0) {}
+          modelFolders(surreal::paths::DefaultAssetSearchDirs()),
+          currentPaletteIdx(0)
+    {
+        if (std::filesystem::exists("/opt/meinos")) {
+            if (std::find(modelFolders.begin(), modelFolders.end(), "/opt/meinos") == modelFolders.end()) {
+                modelFolders.push_back("/opt/meinos");
+            }
+        }
+        if (modelFolders.empty()) {
+            modelFolders.push_back("assets/models");
+        }
+    }
 
     void SetStatus(const std::string& msg, float duration = 3.0f) {
         statusMessage = msg;
@@ -170,6 +336,7 @@ public:
     }
 
     void Update(float dt) {
+        editorClock += std::max(0.0f, dt);
         if (statusTimer > 0.0f) {
             statusTimer -= dt;
             if (statusTimer <= 0.0f) {
@@ -454,6 +621,7 @@ public:
         placementMetallic = 0.25f;
         placementRoughness = 0.45f;
         placementSkeletal = nullptr;
+        placementAssetPath = file.fullPath;
 
         bool loaded = false;
         bool isPhoto = IsImageFile(file);
@@ -476,7 +644,9 @@ public:
             loaded = SurrealSkeletalLoader::LoadSkeletalModel(file.fullPath, *inst);
             if (loaded) {
                 placementMesh = inst->activeDeformedMesh;
-                placementSkeletal = inst;
+                if (inst->HasSkinData() || !inst->clips.empty()) {
+                    placementSkeletal = inst;
+                }
             }
         }
 
@@ -546,6 +716,7 @@ public:
         placementMetallic = 0.25f;
         placementRoughness = 0.45f;
         placementSkeletal = nullptr;
+        placementAssetPath = fullPath;
 
         bool loaded = false;
         bool isPhoto = IsImageFile(file);
@@ -575,7 +746,9 @@ public:
             loaded = SurrealSkeletalLoader::LoadSkeletalModel(file.fullPath, *inst);
             if (loaded) {
                 placementMesh = inst->activeDeformedMesh;
-                placementSkeletal = inst;
+                if (inst->HasSkinData() || !inst->clips.empty()) {
+                    placementSkeletal = inst;
+                }
             }
         }
 
@@ -629,24 +802,26 @@ public:
         placementColor = colorPalette[currentPaletteIdx % colorPalette.size()];
         placementMetallic = 0.45f;
         placementRoughness = 0.35f;
+        placementSkeletal = nullptr;
+        placementAssetPath.clear();
 
         switch (presetIdx) {
             case 1:
                 placementName = "ParkourRamp_" + std::to_string(entities.size() + 1);
                 placementScale = Vec3(2.2f, 1.5f, 3.8f);
-                placementMesh = SurrealModelLoader::CreateRamp(placementScale, placementColor);
+                placementMesh = SurrealModelLoader::CreateRamp(Vec3(1.0f, 1.0f, 1.0f), placementColor);
                 activePreset = ModelPresetType::RAMP;
                 break;
             case 2:
                 placementName = "CyberMonolith_" + std::to_string(entities.size() + 1);
                 placementScale = Vec3(1.4f, 3.2f, 1.4f);
-                placementMesh = SurrealModelLoader::CreateMonolith(placementScale, placementColor);
+                placementMesh = SurrealModelLoader::CreateMonolith(Vec3(1.0f, 1.0f, 1.0f), placementColor);
                 activePreset = ModelPresetType::MONOLITH;
                 break;
             case 3:
                 placementName = "QuantumCore_" + std::to_string(entities.size() + 1);
                 placementScale = Vec3(1.6f, 1.6f, 1.6f);
-                placementMesh = SurrealModelLoader::CreateOrb(0.85f, 18, 24, placementColor);
+                placementMesh = SurrealModelLoader::CreateOrb(0.5f, 18, 24, placementColor);
                 activePreset = ModelPresetType::ORB;
                 break;
             default:
@@ -795,6 +970,8 @@ public:
     void ConfirmPlacement(SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
         if (!isPlacingModel || !placementMesh) return;
 
+        PushUndoSnapshot(world, "Place " + placementName);
+
         EntityID newEntity = world.CreateEntity(placementName);
         TransformComponent& tr = world.transforms[newEntity];
         tr.position = placementPos;
@@ -817,6 +994,8 @@ public:
         ed.color = placementColor;
         ed.metallic = placementMetallic;
         ed.roughness = placementRoughness;
+        ed.assetPath = placementAssetPath;
+        ed.presetType = activePreset;
         bool isEnv = (placementName.find("City") != std::string::npos ||
                       placementName.find("Seoul") != std::string::npos ||
                       placementName.find("Map") != std::string::npos ||
@@ -833,7 +1012,7 @@ public:
             placementSkeletal = nullptr;
         }
 
-        SyncObstacles(obstacles);
+        SyncObstacles(obstacles, &world);
         isPlacingModel = false;
         SetStatus("[✓] Successfully placed model: " + placementName, 4.0f);
     }
@@ -851,14 +1030,16 @@ public:
     // Move selected entity along world axes
     void MoveSelected(const Vec3& delta, SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
         EditableEntity* ent = GetSelectedEntity();
-        if (!ent || ent->name == "CyberGridFloor") return;
+        if (!ent || ent->name == "CyberGridFloor" || ent->name == "MetropolisGroundFloor") return;
+
+        PushUndoSnapshot(world, "Move " + ent->name, "move:" + std::to_string(ent->id));
 
         ent->position = ent->position + delta;
         if (world.transforms.find(ent->id) != world.transforms.end()) {
             world.transforms[ent->id].position = ent->position;
         }
 
-        SyncObstacles(obstacles);
+        SyncObstacles(obstacles, &world);
         SetStatus("Moved " + ent->name + " -> (" + FormatVec(ent->position) + ")");
     }
 
@@ -866,6 +1047,8 @@ public:
     void ScaleSelected(float factor, SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
         EditableEntity* ent = GetSelectedEntity();
         if (!ent || ent->name == "CyberGridFloor" || ent->name == "MetropolisGroundFloor") return;
+
+        PushUndoSnapshot(world, "Scale " + ent->name, "scale:" + std::to_string(ent->id));
 
         ent->scale = ent->scale * factor;
         ent->scale.x = std::max(0.01f, std::min(100.0f, ent->scale.x));
@@ -876,20 +1059,25 @@ public:
             world.transforms[ent->id].scale = ent->scale;
         }
 
-        SyncObstacles(obstacles);
+        SyncObstacles(obstacles, &world);
         char buf[128];
         std::snprintf(buf, sizeof(buf), "[✓] Scaled %s -> (%.2f, %.2f, %.2f)",
                       ent->name.c_str(), ent->scale.x, ent->scale.y, ent->scale.z);
         SetStatus(buf, 2.5f);
     }
 
-    void RotateSelected(float deltaYaw, SurrealWorld& world) {
+    void RotateSelected(float deltaYaw, SurrealWorld& world, std::vector<ObstacleBox>* obstacles = nullptr) {
         EditableEntity* ent = GetSelectedEntity();
         if (!ent || ent->name == "CyberGridFloor" || ent->name == "MetropolisGroundFloor" || ent->isStaticTerrain) return;
+
+        PushUndoSnapshot(world, "Rotate " + ent->name, "rot:" + std::to_string(ent->id));
 
         ent->yaw += deltaYaw;
         if (world.transforms.find(ent->id) != world.transforms.end()) {
             world.transforms[ent->id].rotation = Quat::FromAxisAngle(Vec3(0, 1.0f, 0), ent->yaw);
+        }
+        if (obstacles) {
+            SyncObstacles(*obstacles, &world);
         }
         int deg = static_cast<int>(std::round(ent->yaw * 180.0f / M_PI)) % 360;
         if (deg < 0) deg += 360;
@@ -919,14 +1107,16 @@ public:
         }
 
         EditableEntity* ent = GetSelectedEntity();
-        if (!ent || ent->name == "CyberGridFloor" || ent->isCharacter) return;
+        if (!ent || ent->name == "CyberGridFloor" || ent->name == "MetropolisGroundFloor" || ent->isCharacter) return;
+
+        PushUndoSnapshot(world, "Color " + ent->name, "color:" + std::to_string(ent->id));
 
         ent->color = newColor;
         if (world.meshRenderers.find(ent->id) != world.meshRenderers.end()) {
             world.meshRenderers[ent->id].material.albedo = ent->color;
         }
 
-        SyncObstacles(obstacles);
+        SyncObstacles(obstacles, &world);
         SetStatus("Color Tint: " + ent->name + " Updated");
     }
 
@@ -940,7 +1130,9 @@ public:
         }
 
         EditableEntity* ent = GetSelectedEntity();
-        if (!ent || ent->name == "CyberGridFloor") return;
+        if (!ent || ent->name == "CyberGridFloor" || ent->name == "MetropolisGroundFloor") return;
+
+        PushUndoSnapshot(world, "PBR " + ent->name, "pbr:" + std::to_string(ent->id));
 
         if (ent->metallic < 0.3f) {
             ent->metallic = 0.50f;
@@ -962,6 +1154,8 @@ public:
 
     // Spawn new Platform / Box
     void SpawnPlatform(SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
+        PushUndoSnapshot(world, "Spawn Platform");
+
         std::string newName = "Platform_" + std::to_string(entities.size() + 1);
         Vec3 spawnPos = flyCamPos + GetFlyForward() * 3.5f;
         spawnPos.y = std::max(0.35f, spawnPos.y);
@@ -972,9 +1166,10 @@ public:
         EntityID platEntity = world.CreateEntity(newName);
         TransformComponent& pt = world.transforms[platEntity];
         pt.position = spawnPos;
+        pt.scale = newScale;
 
         MeshRendererComponent platRenderer;
-        platRenderer.mesh = SurrealTerrainBuilder::CreateBox(newScale, newColor);
+        platRenderer.mesh = SurrealTerrainBuilder::CreateBox(Vec3(1.0f, 1.0f, 1.0f), newColor);
         platRenderer.material.albedo = newColor;
         platRenderer.material.metallic = 0.35f;
         platRenderer.material.roughness = 0.40f;
@@ -990,11 +1185,12 @@ public:
         ed.roughness = 0.40f;
         ed.isStaticTerrain = false;
         ed.isCharacter = false;
+        ed.presetType = ModelPresetType::CRATE;
 
         entities.push_back(ed);
         selectedIndex = static_cast<int>(entities.size() - 1);
 
-        SyncObstacles(obstacles);
+        SyncObstacles(obstacles, &world);
         SetStatus("[+] Spawned New Platform: " + newName);
     }
 
@@ -1003,55 +1199,75 @@ public:
         EditableEntity* src = GetSelectedEntity();
         if (!src || src->isStaticTerrain || src->isCharacter) return;
 
-        std::string dupName = src->name + "_Copy";
-        Vec3 dupPos = src->position + Vec3(1.2f, 0.3f, 0.0f);
+        PushUndoSnapshot(world, "Duplicate " + src->name);
 
-        EntityID platEntity = world.CreateEntity(dupName);
-        TransformComponent& pt = world.transforms[platEntity];
+        // Grab copies before push_back invalidates src pointer!
+        EditableEntity copySrc = *src;
+        std::string dupName = copySrc.name + "_Copy";
+        Vec3 dupPos = copySrc.position + Vec3(1.2f, 0.3f, 0.0f);
+
+        EntityID dupEntity = world.CreateEntity(dupName);
+        TransformComponent& pt = world.transforms[dupEntity];
         pt.position = dupPos;
+        pt.scale = copySrc.scale;
+        pt.rotation = Quat::FromAxisAngle(Vec3(0, 1.0f, 0), copySrc.yaw);
 
-        MeshRendererComponent platRenderer;
-        platRenderer.mesh = SurrealTerrainBuilder::CreateBox(src->scale, src->color);
-        platRenderer.material.albedo = src->color;
-        platRenderer.material.metallic = src->metallic;
-        platRenderer.material.roughness = src->roughness;
-        world.meshRenderers[platEntity] = platRenderer;
+        MeshRendererComponent dupRenderer;
+        auto itSrcMr = world.meshRenderers.find(copySrc.id);
+        if (itSrcMr != world.meshRenderers.end() && itSrcMr->second.mesh &&
+            copySrc.presetType != ModelPresetType::CRATE) {
+            dupRenderer = itSrcMr->second;
+        } else {
+            dupRenderer.mesh = SurrealTerrainBuilder::CreateBox(Vec3(1.0f, 1.0f, 1.0f), copySrc.color);
+        }
+        dupRenderer.material.albedo = copySrc.color;
+        dupRenderer.material.metallic = copySrc.metallic;
+        dupRenderer.material.roughness = copySrc.roughness;
+        world.meshRenderers[dupEntity] = dupRenderer;
 
-        EditableEntity ed;
-        ed.id = platEntity;
+        EditableEntity ed = copySrc;
+        ed.id = dupEntity;
         ed.name = dupName;
         ed.position = dupPos;
-        ed.scale = src->scale;
-        ed.color = src->color;
-        ed.metallic = src->metallic;
-        ed.roughness = src->roughness;
         ed.isStaticTerrain = false;
         ed.isCharacter = false;
 
         entities.push_back(ed);
         selectedIndex = static_cast<int>(entities.size() - 1);
 
-        SyncObstacles(obstacles);
+        SyncObstacles(obstacles, &world);
         SetStatus("[+] Cloned: " + dupName);
     }
 
     // Delete Selected Entity
     void DeleteSelected(SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
         EditableEntity* ent = GetSelectedEntity();
-        if (!ent || ent->name == "CyberGridFloor" || ent->isCharacter) {
+        if (!ent || ent->name == "CyberGridFloor" || ent->name == "MetropolisGroundFloor" || ent->isCharacter) {
             SetStatus("[!] Cannot delete core scene entity!");
             return;
         }
 
+        PushUndoSnapshot(world, "Delete " + ent->name);
+
         std::string delName = ent->name;
-        animatedEntities.erase(ent->id);
-        world.DestroyEntity(ent->id);
+        EntityID delId = ent->id;
+        std::shared_ptr<SurrealMesh> deletedMesh;
+        auto itMr = world.meshRenderers.find(delId);
+        if (itMr != world.meshRenderers.end()) {
+            deletedMesh = itMr->second.mesh;
+        }
+
+        animatedEntities.erase(delId);
+        world.DestroyEntity(delId);
         entities.erase(entities.begin() + selectedIndex);
-        if (selectedIndex >= static_cast<int>(entities.size())) {
+        if (entities.empty()) {
+            selectedIndex = -1;
+        } else if (selectedIndex >= static_cast<int>(entities.size())) {
             selectedIndex = static_cast<int>(entities.size() - 1);
         }
 
-        SyncObstacles(obstacles);
+        EvictMeshIfUnreferenced(deletedMesh, world);
+        SyncObstacles(obstacles, &world);
         SetStatus("[-] Deleted Entity: " + delName);
     }
 
@@ -1105,88 +1321,40 @@ public:
         ApplyActiveLearnedChoreo(true);
     }
 
-    bool SyncAionChoreoMemory(const std::string& jsonPath = "/root/coding/AI_Desktop/aion_minime_memory.json") {
+    bool SyncAionChoreoMemory(const std::string& jsonPath = "") {
+        const std::string resolvedPath = jsonPath.empty() ? surreal::paths::ResolveMemoryFile() : jsonPath;
         std::error_code ec;
-        if (!std::filesystem::exists(jsonPath, ec)) return false;
-        auto mtime = std::filesystem::last_write_time(jsonPath, ec);
+        if (!std::filesystem::exists(resolvedPath, ec)) return false;
+        auto mtime = std::filesystem::last_write_time(resolvedPath, ec);
         if (ec) return false;
         if (choreoMemInitialized && mtime == lastChoreoMemMTime) return false;
         lastChoreoMemMTime = mtime;
         bool wasInitialized = choreoMemInitialized;
         choreoMemInitialized = true;
 
-        std::ifstream f(jsonPath);
+        std::ifstream f(resolvedPath);
         if (!f.is_open()) return false;
         std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         f.close();
 
-        size_t arrKey = content.find("\"learned_choreographies\"");
-        if (arrKey == std::string::npos) return false;
-        size_t openBr = content.find('[', arrKey);
-        if (openBr == std::string::npos) return false;
+        surreal::json::JsonValue root;
+        if (!surreal::json::Parse(content, root) || !root.IsObject()) return false;
 
-        // Find matching ']'
-        int depth = 0;
-        size_t closeBr = std::string::npos;
-        bool inStr = false, esc = false;
-        for (size_t i = openBr; i < content.size(); ++i) {
-            char c = content[i];
-            if (esc) { esc = false; continue; }
-            if (c == '\\') { esc = true; continue; }
-            if (c == '"') { inStr = !inStr; continue; }
-            if (!inStr) {
-                if (c == '[') ++depth;
-                else if (c == ']') {
-                    --depth;
-                    if (depth == 0) { closeBr = i; break; }
-                }
-            }
-        }
-        if (closeBr == std::string::npos) return false;
+        const auto* arrVal = root.Find("learned_choreographies");
+        if (!arrVal || !arrVal->IsArray()) return false;
 
-        std::string arrBody = content.substr(openBr + 1, closeBr - openBr - 1);
         std::vector<LearnedChoreoEntry> parsed;
-        size_t pos = 0;
-        while (pos < arrBody.size()) {
-            size_t ob = arrBody.find('{', pos);
-            if (ob == std::string::npos) break;
-            size_t cb = arrBody.find('}', ob);
-            if (cb == std::string::npos) break;
-            std::string obj = arrBody.substr(ob, cb - ob + 1);
-            pos = cb + 1;
-
-            auto extractStr = [&](const std::string& k) -> std::string {
-                size_t kp = obj.find("\"" + k + "\"");
-                if (kp == std::string::npos) return "";
-                size_t col = obj.find(':', kp);
-                if (col == std::string::npos) return "";
-                size_t q1 = obj.find('"', col + 1);
-                if (q1 == std::string::npos) return "";
-                std::string out;
-                for (size_t qi = q1 + 1; qi < obj.size(); ++qi) {
-                    if (obj[qi] == '\\' && qi + 1 < obj.size()) { out += obj[++qi]; continue; }
-                    if (obj[qi] == '"') break;
-                    out += obj[qi];
-                }
-                return out;
-            };
-            auto extractNum = [&](const std::string& k, float defVal) -> float {
-                size_t kp = obj.find("\"" + k + "\"");
-                if (kp == std::string::npos) return defVal;
-                size_t col = obj.find(':', kp);
-                if (col == std::string::npos) return defVal;
-                try { return std::stof(obj.substr(col + 1)); } catch (...) { return defVal; }
-            };
-
+        for (const auto& item : arrVal->arrVal) {
+            if (!item.IsObject()) continue;
             LearnedChoreoEntry entry;
-            entry.name = extractStr("name");
+            entry.name = item.GetString("name", "");
             const std::string pfx = "Live Video Choreo: ";
             if (entry.name.rfind(pfx, 0) == 0) {
                 entry.name = entry.name.substr(pfx.size());
             }
-            entry.bpm = extractNum("bpm", 128.0f);
-            entry.hipSway = extractNum("hipSway", 1.25f);
-            entry.armWave = extractNum("armWave", 1.25f);
+            entry.bpm = item.GetFloat("bpm", 128.0f);
+            entry.hipSway = item.GetFloat("hipSway", 1.25f);
+            entry.armWave = item.GetFloat("armWave", 1.25f);
             if (!entry.name.empty()) {
                 parsed.push_back(entry);
             }
