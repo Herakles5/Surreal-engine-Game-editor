@@ -461,7 +461,7 @@ public:
                 for (auto& v : outMesh->vertices) {
                     v.position.y -= minY;
                 }
-                outMesh->CalculateBounds();
+                outMesh->BuildClusters();
             }
         }
         return success;

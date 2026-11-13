@@ -311,17 +311,28 @@ private:
     void Poll() {
 #ifndef _WIN32
         if (!connected || fd < 0) return;
+        auto drainCompleteLines = [&]() {
+            size_t pos;
+            while ((pos = rx.find('\n')) != std::string::npos) {
+                std::string line = rx.substr(0, pos);
+                rx.erase(0, pos + 1);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (!line.empty() && line[0] == '{') HandleEvent(line);
+            }
+        };
+
         char buf[1024];
         for (;;) {
             ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
             if (n > 0) {
                 rx.append(buf, static_cast<size_t>(n));
+                drainCompleteLines();
                 if (rx.size() > 65536) {
-                    size_t lastNl = rx.rfind('\n');
-                    if (lastNl != std::string::npos) rx.erase(0, lastNl + 1);
-                    else rx.clear();
+                    // Any remaining buffer above 64KB has no newline; drop overlong partial line safely
+                    rx.clear();
                 }
             } else if (n == 0) {
+                drainCompleteLines();
                 Disconnect();
                 Push("AION NEXUS LINK CLOSED", 0xFFFF6666, 6.0f);
                 return;
@@ -330,12 +341,7 @@ private:
                 break;
             }
         }
-        size_t pos;
-        while ((pos = rx.find('\n')) != std::string::npos) {
-            std::string line = rx.substr(0, pos);
-            rx.erase(0, pos + 1);
-            if (!line.empty() && line[0] == '{') HandleEvent(line);
-        }
+        drainCompleteLines();
 #endif
     }
 

@@ -130,10 +130,10 @@ static void TestCPURasterizerAndMeshlets() {
     engine.Clear(0xFF123456);
     CHECK(fb[0] == 0xFF123456 && fb[W * H - 1] == 0xFF123456, "Clear(clearColor) fills exact framebuffer color");
 
-    // Near-plane clipping check: huge triangle straddling camera plane z=3.0 (v0 behind cam, v1/v2 in front)
+    // Near-plane clipping check: triangle straddling camera plane z=3.0 (v0 behind cam, v1/v2 in front), tilted cleanly off eye plane
     auto clipMesh = std::make_shared<SurrealMesh>();
     clipMesh->vertices = {
-        Vertex3D(Vec3( 0.0f,  0.5f, 6.0f), Vec3(0, 0, 1), 0.5f, 0.0f, Vec4(1, 0, 0, 1)), // behind eye at z=3!
+        Vertex3D(Vec3( 0.0f,  1.5f, 6.0f), Vec3(0, 0, 1), 0.5f, 0.0f, Vec4(1, 0, 0, 1)), // behind eye at z=3!
         Vertex3D(Vec3(-1.5f, -0.5f, 0.0f), Vec3(0, 0, 1), 0.0f, 1.0f, Vec4(0, 1, 0, 1)),
         Vertex3D(Vec3( 1.5f, -0.5f, 0.0f), Vec3(0, 0, 1), 1.0f, 1.0f, Vec4(0, 0, 1, 1)),
     };
@@ -144,6 +144,7 @@ static void TestCPURasterizerAndMeshlets() {
     PBRMaterial whiteMat;
     whiteMat.albedo = ColorRGB(1.0f, 1.0f, 1.0f);
     whiteMat.roughness = 0.6f;
+    whiteMat.doubleSided = true;
     engine.DrawCustomMesh(clipMesh, Mat4::Identity(), whiteMat);
 
     // Count pixels drawn (should be drawn safely across lower portion without NaN/corrupt wraparound at top row)
@@ -256,15 +257,16 @@ static void TestECSPhysics() {
     float dist = (world.transforms[b].position - world.transforms[a].position).Length();
     CHECK(dist >= 1.18f, "Overlapping spheres separate cleanly during UpdatePhysics");
 
-    // Large dt clamp & friction non-negative stability
-    EntityID c = world.CreateEntity("ClampBody");
-    world.transforms[c].position = Vec3(0.0f, 0.5f, 0.0f);
-    world.rigidbodies[c].velocity = Vec3(10.0f, 0.0f, 0.0f);
-    world.colliders[c].type = ColliderComponent::SPHERE;
-    world.colliders[c].radius = 0.5f;
-    world.UpdatePhysics(10.0f);
-    CHECK(IsFiniteVec3(world.transforms[c].position) && world.transforms[c].position.y >= 0.5f &&
-          world.rigidbodies[c].velocity.x >= 0.0f,
+    // Large dt clamp & friction non-negative stability (isolated world so no overlap with SphereA/SphereB)
+    SurrealWorld clampWorld;
+    EntityID c = clampWorld.CreateEntity("ClampBody");
+    clampWorld.transforms[c].position = Vec3(0.0f, 0.5f, 0.0f);
+    clampWorld.rigidbodies[c].velocity = Vec3(10.0f, 0.0f, 0.0f);
+    clampWorld.colliders[c].type = ColliderComponent::SPHERE;
+    clampWorld.colliders[c].radius = 0.5f;
+    clampWorld.UpdatePhysics(10.0f);
+    CHECK(IsFiniteVec3(clampWorld.transforms[c].position) && clampWorld.transforms[c].position.y >= 0.5f &&
+          clampWorld.rigidbodies[c].velocity.x >= 0.0f,
           "UpdatePhysics clamps large dt and keeps ground friction stable");
 }
 
@@ -314,14 +316,23 @@ static void TestGLTFHierarchyAndSkeletalCrossFade() {
         gf.close();
     }
 
+    auto rawCombined = SurrealGLTFLoader::LoadCombinedMesh(gltfPath);
+    CHECK(rawCombined && rawCombined->vertices.size() == 3,
+          "SurrealGLTFLoader::LoadCombinedMesh loads .gltf hierarchy");
+    if (rawCombined && !rawCombined->vertices.empty()) {
+        Vec3 rv0 = rawCombined->vertices[0].position;
+        CHECK(std::fabs(rv0.x - 11.0f) < 1e-4f && std::fabs(rv0.y - 22.0f) < 1e-4f && std::fabs(rv0.z - 33.0f) < 1e-4f,
+              "glTF loader bakes full Parent+Child world transform hierarchy (10+1, 20+2, 30+3)");
+    }
+
     std::shared_ptr<SurrealMesh> customMesh;
     bool okLoadCustom = SurrealModelLoader::LoadCustomFile(gltfPath, customMesh, ColorRGB(1, 1, 1));
     CHECK(okLoadCustom && customMesh && customMesh->vertices.size() == 3,
           "SurrealModelLoader::LoadCustomFile loads .gltf files cleanly");
     if (customMesh && !customMesh->vertices.empty()) {
         Vec3 v0 = customMesh->vertices[0].position;
-        CHECK(std::fabs(v0.x - 11.0f) < 1e-4f && std::fabs(v0.y - 22.0f) < 1e-4f && std::fabs(v0.z - 33.0f) < 1e-4f,
-              "glTF loader bakes full Parent+Child world transform hierarchy (10+1, 20+2, 30+3)");
+        CHECK(std::fabs(v0.x - 11.0f) < 1e-4f && std::fabs(v0.y) < 1e-4f && std::fabs(v0.z - 33.0f) < 1e-4f,
+              "LoadCustomFile preserves X/Z hierarchy and aligns min.y to floor 0");
     }
 
     // Also test real avatar scene.gltf if available
@@ -505,7 +516,9 @@ static void TestAionLinkNonBlockingSocket() {
         socklen_t clen = sizeof(cli);
         int cfd = ::accept(srv, reinterpret_cast<sockaddr*>(&cli), &clen);
         if (cfd >= 0) {
-            const char* msg = "{\"generation\":77,\"rules\":42,\"goal\":\"TestSync\"}\n";
+            const char* msg =
+                "{\"event\":\"CONNECTED\",\"generation\":77,\"rules_count\":42}\n"
+                "{\"event\":\"NEW_AUTONOMOUS_GOAL\",\"goal\":\"TestSync\"}\n";
             ::send(cfd, msg, std::strlen(msg), 0);
             // Send oversized line without newline (> 70 KB) to verify rx overflow protection
             std::string noise(70000, 'X');

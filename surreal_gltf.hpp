@@ -24,6 +24,7 @@
 #include <memory>
 #include <iostream>
 #include <cstring>
+#include <filesystem>
 
 namespace Surreal {
 
@@ -46,17 +47,22 @@ public:
         cgltf_options options;
         std::memset(&options, 0, sizeof(cgltf_options));
 
+        // Resolve symlinks so relative .bin/texture URIs inside .gltf load from real target folder
+        std::error_code ec;
+        std::filesystem::path can = std::filesystem::canonical(filepath, ec);
+        const std::string resolvedPath = ec ? filepath : can.string();
+
         cgltf_data* data = nullptr;
-        cgltf_result result = cgltf_parse_file(&options, filepath.c_str(), &data);
+        cgltf_result result = cgltf_parse_file(&options, resolvedPath.c_str(), &data);
 
         if (result != cgltf_result_success) {
-            std::cerr << "[SurrealGLTF] Failed to parse glTF: " << filepath << " (Code " << result << ")\n";
+            std::cerr << "[SurrealGLTF] Failed to parse glTF: " << resolvedPath << " (Code " << result << ")\n";
             return false;
         }
 
-        result = cgltf_load_buffers(&options, data, filepath.c_str());
+        result = cgltf_load_buffers(&options, data, resolvedPath.c_str());
         if (result != cgltf_result_success) {
-            std::cerr << "[SurrealGLTF] Failed to load binary buffers for: " << filepath << "\n";
+            std::cerr << "[SurrealGLTF] Failed to load binary buffers for: " << resolvedPath << "\n";
             cgltf_free(data);
             return false;
         }
