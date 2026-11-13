@@ -1174,24 +1174,39 @@ VKAPI_ATTR VkResult VKAPI_CALL hookQueuePresentKHR(VkQueue queue, const VkPresen
     postUpscaleSems.reserve(info->swapchainCount);
 
     {
-        std::lock_guard<std::mutex> l(gSwapMutex);
+        std::unique_lock<std::mutex> lock(gSwapMutex);
         bool waitedAppSems = false;
         for (uint32_t i = 0; i < info->swapchainCount; ++i) {
-            auto it = gSwapchains.find(info->pSwapchains[i]);
+            VkSwapchainKHR sc = info->pSwapchains[i];
+            auto it = gSwapchains.find(sc);
             if (it == gSwapchains.end()) continue;
 
-            SwapchainUpscaler& u = it->second;
             uint32_t imgIdx = info->pImageIndices[i];
-            if (imgIdx >= u.realImages.size()) continue;
-            if (!ensureUpscaleCommandBuffers(d, u, qFamily)) continue;
+            if (imgIdx >= it->second.realImages.size()) continue;
+            if (!ensureUpscaleCommandBuffers(d, it->second, qFamily)) continue;
 
-            SyncSlot& slot = u.syncRing[u.syncCursor];
-            u.syncCursor = (u.syncCursor + 1) % u.syncRing.size();
-            if (slot.submitted) {
-                d->waitForFences(u.device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
-                d->resetFences(u.device, 1, &slot.fence);
-                slot.submitted = false;
+            uint32_t slotIdx = it->second.syncCursor;
+            it->second.syncCursor = (slotIdx + 1) % it->second.syncRing.size();
+
+            if (it->second.syncRing[slotIdx].submitted) {
+                VkDevice waitDev = it->second.device;
+                VkFence waitFence = it->second.syncRing[slotIdx].fence;
+                lock.unlock();
+                d->waitForFences(waitDev, 1, &waitFence, VK_TRUE, UINT64_MAX);
+                lock.lock();
+
+                // Re-validate swapchain & slot after blocking wait in case swapchain was destroyed/resized
+                it = gSwapchains.find(sc);
+                if (it == gSwapchains.end() || imgIdx >= it->second.realImages.size() ||
+                    slotIdx >= it->second.syncRing.size()) {
+                    continue;
+                }
+                d->resetFences(it->second.device, 1, &it->second.syncRing[slotIdx].fence);
+                it->second.syncRing[slotIdx].submitted = false;
             }
+
+            SwapchainUpscaler& u = it->second;
+            SyncSlot& slot = u.syncRing[slotIdx];
 
             uint32_t waitCount = (!waitedAppSems) ? info->waitSemaphoreCount : 0;
             const VkSemaphore* waitSems = (!waitedAppSems) ? info->pWaitSemaphores : nullptr;

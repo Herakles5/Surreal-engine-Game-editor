@@ -34,6 +34,7 @@
 #include "surreal_meshlet.hpp"
 #include "surreal_animation.hpp"
 #include "surreal_image3d.hpp"
+#include "surreal_paths.hpp"
 #include <string>
 #include <vector>
 #include <memory>

@@ -1614,7 +1614,9 @@ int main(int argc, char* argv[]) {
                 constexpr float CHAR_RADIUS = 0.22f;
 
                 for (const auto& obs : obstacles) {
-                    if (charPos.y < obs.topY - 0.12f) {
+                    const float charBottom = charPos.y;
+                    const float charTop = charPos.y + 1.55f;
+                    if (charBottom < obs.topY - 0.12f && charTop > obs.aabb.min.y + 0.05f) {
                         if (nextPos.x >= obs.aabb.min.x - CHAR_RADIUS && nextPos.x <= obs.aabb.max.x + CHAR_RADIUS &&
                             charPos.z >= obs.aabb.min.z - CHAR_RADIUS && charPos.z <= obs.aabb.max.z + CHAR_RADIUS)
                         {
@@ -1710,11 +1712,20 @@ int main(int argc, char* argv[]) {
         Surreal::Mat4 vpMat = engine.GetProjectionMatrix() * engine.GetViewMatrix();
         Surreal::Frustum camFrustum = Surreal::Frustum::FromViewProjection(vpMat);
 
-        // --- 2. Skeletal Animation Update (with Gen 4833/4834 Topological Frustum & Cadence Pruning) ---
+        // --- 2. Skeletal Animation Update (GPU Matrix Skinning in OpenGL mode, CPU AVX2 when Software fallback active) ---
         if (!animPaused || isBenchmarkRunning) {
             auto tSkinStart = std::chrono::high_resolution_clock::now();
-            character.Update(dt);
-            editor.UpdateAnimations(dt, &engine.world, &camFrustum, &engine.cameraPos);
+            const bool useGpuSkin = (hybridRenderer.backend == Surreal::RenderBackend::GPU_OPENGL &&
+                                     hybridRenderer.isGLInitialized &&
+                                     character.HasSkinData());
+            if (!character.hasFootBaseOffset || !character.staticAttributesInitialized) {
+                character.Update(dt, true);
+            } else {
+                character.Update(dt, !useGpuSkin);
+            }
+            const bool glActive = (hybridRenderer.backend == Surreal::RenderBackend::GPU_OPENGL &&
+                                   hybridRenderer.isGLInitialized);
+            editor.UpdateAnimations(dt, &engine.world, &camFrustum, &engine.cameraPos, !glActive);
             auto tSkinEnd = std::chrono::high_resolution_clock::now();
             lastSkinningMs = std::chrono::duration<float, std::milli>(tSkinEnd - tSkinStart).count();
         }
@@ -1738,32 +1749,45 @@ int main(int argc, char* argv[]) {
             // --- GPU HARDWARE OPENGL 4.6 PIPELINE ---
             const auto& curSky = skyProfiles[currentSkyProfile % 4];
 
-            // 1. Directional Shadow Depth Pass (2048x2048 PCF Shadow Map)
+            // 1. Directional Shadow Depth Pass (3-Cascade CSM 2048x2048x3 PCF Shadow Map Array)
             if (shadowsEnabled && hybridRenderer.shaderQuality >= 1) {
-                hybridRenderer.BeginShadowPass(engine.world.sunLight.direction, charPos);
-                for (auto entityID : engine.world.entities) {
-                    auto itMr = engine.world.meshRenderers.find(entityID);
-                    auto itTr = engine.world.transforms.find(entityID);
-                    if (itMr == engine.world.meshRenderers.end() || itTr == engine.world.transforms.end()) continue;
-                    const auto& mesh = itMr->second.mesh;
-                    if (!mesh || mesh->vertices.empty()) continue;
-                    // Skip flat ground plane in shadow caster pass to avoid self-shadowing acne
-                    if (entityID == floorEntity) continue;
+                Surreal::Vec3 camFwd = (engine.cameraTarget - engine.cameraPos).Normalized();
+                hybridRenderer.BeginShadowPass(engine.world.sunLight.direction, charPos, camFwd);
+                const int numCascades = (hybridRenderer.shaderQuality >= 2) ? Surreal::SurrealHybridRenderer::NUM_SHADOW_CASCADES : 2;
+                for (int cascade = 0; cascade < numCascades; ++cascade) {
+                    if (cascade > 0 && !hybridRenderer.BeginShadowCascade(cascade)) continue;
+                    for (auto entityID : engine.world.entities) {
+                        auto itMr = engine.world.meshRenderers.find(entityID);
+                        auto itTr = engine.world.transforms.find(entityID);
+                        if (itMr == engine.world.meshRenderers.end() || itTr == engine.world.transforms.end()) continue;
+                        const auto& mesh = itMr->second.mesh;
+                        if (!mesh || mesh->vertices.empty()) continue;
+                        // Skip flat ground plane in shadow caster pass to avoid self-shadowing acne
+                        if (entityID == floorEntity) continue;
+                        // Outer cascade skips small fine-detail meshes to keep GPU shadow fill fast
+                        if (cascade == 2 && mesh->vertices.size() < 200) continue;
 
-                    Surreal::Mat4 worldMat = itTr->second.GetWorldMatrix();
-                    bool isDyn = (entityID == avatarEntity) || (editor.animatedEntities.find(entityID) != editor.animatedEntities.end());
-                    bool upVBO = false;
-                    if (entityID == avatarEntity) {
-                        upVBO = character.dirtyGPUUpload;
-                        character.dirtyGPUUpload = false;
-                    } else if (isDyn) {
+                        Surreal::Mat4 worldMat = itTr->second.GetWorldMatrix();
+                        if (entityID == avatarEntity && character.HasSkinData()) {
+                            hybridRenderer.RenderSkinnedMeshShadow(character, worldMat);
+                            continue;
+                        }
                         auto itA = editor.animatedEntities.find(entityID);
                         if (itA != editor.animatedEntities.end() && itA->second) {
-                            upVBO = itA->second->dirtyGPUUpload;
-                            itA->second->dirtyGPUUpload = false;
+                            if (itA->second->HasSkinData()) {
+                                hybridRenderer.RenderSkinnedMeshShadow(*itA->second, worldMat);
+                            } else {
+                                bool upVBO = itA->second->dirtyGPUUpload;
+                                itA->second->dirtyGPUUpload = false;
+                                hybridRenderer.RenderMeshShadow(mesh, worldMat, true, upVBO);
+                            }
+                            continue;
                         }
+                        bool isDyn = (entityID == avatarEntity);
+                        bool upVBO = isDyn ? character.dirtyGPUUpload : false;
+                        if (isDyn) character.dirtyGPUUpload = false;
+                        hybridRenderer.RenderMeshShadow(mesh, worldMat, isDyn, upVBO);
                     }
-                    hybridRenderer.RenderMeshShadow(mesh, worldMat, isDyn, upVBO);
                 }
                 hybridRenderer.EndShadowPass();
             } else {
@@ -1858,11 +1882,11 @@ int main(int argc, char* argv[]) {
                         engine.culledMeshlets += std::max<uint32_t>(1u, static_cast<uint32_t>(mesh->meshlets.size()));
                         continue;
                     }
-                    // Adaptive City-Block Distance Culling for high-FPS target (Fast & Balanced modes)
+                    // Adaptive City-Block Distance Culling (preserves skyline continuity down the boulevard)
                     if (entityID != floorEntity && entityID != avatarEntity && mesh->vertices.size() > 15000 &&
                         editor.animatedEntities.find(entityID) == editor.animatedEntities.end()) {
                         float blockDist = (itTr->second.position - engine.cameraPos).Length();
-                        float cullDist = (hybridRenderer.shaderQuality == 0) ? 16.5f : ((hybridRenderer.shaderQuality == 1) ? 26.0f : 60.0f);
+                        float cullDist = (hybridRenderer.shaderQuality == 0) ? 120.0f : ((hybridRenderer.shaderQuality == 1) ? 190.0f : 320.0f);
                         if (blockDist > cullDist) {
                             engine.culledMeshlets += std::max<uint32_t>(1u, static_cast<uint32_t>(mesh->meshlets.size()));
                             continue;
@@ -1871,19 +1895,26 @@ int main(int argc, char* argv[]) {
                 }
                 engine.renderedMeshlets += std::max<uint32_t>(1u, static_cast<uint32_t>(mesh->meshlets.size()));
 
+                if (entityID == avatarEntity && character.HasSkinData()) {
+                    hybridRenderer.RenderSkinnedMesh(character, worldMat, vpMat, itMr->second.material);
+                    continue;
+                }
+                auto itAnim = editor.animatedEntities.find(entityID);
+                if (itAnim != editor.animatedEntities.end() && itAnim->second && itAnim->second->HasSkinData()) {
+                    hybridRenderer.RenderSkinnedMesh(*itAnim->second, worldMat, vpMat, itMr->second.material);
+                    continue;
+                }
+
                 bool isDynamic = false;
                 bool uploadVBO = false;
                 if (entityID == avatarEntity) {
                     isDynamic = true;
                     uploadVBO = character.dirtyGPUUpload;
                     character.dirtyGPUUpload = false;
-                } else {
-                    auto itAnim = editor.animatedEntities.find(entityID);
-                    if (itAnim != editor.animatedEntities.end() && itAnim->second) {
-                        isDynamic = true;
-                        uploadVBO = itAnim->second->dirtyGPUUpload;
-                        itAnim->second->dirtyGPUUpload = false;
-                    }
+                } else if (itAnim != editor.animatedEntities.end() && itAnim->second) {
+                    isDynamic = true;
+                    uploadVBO = itAnim->second->dirtyGPUUpload;
+                    itAnim->second->dirtyGPUUpload = false;
                 }
                 hybridRenderer.RenderMesh(mesh, worldMat, vpMat, itMr->second.material, isDynamic, uploadVBO);
             }
@@ -1945,6 +1976,9 @@ int main(int argc, char* argv[]) {
 
             // Render 3D Game Master Beacons & Energy Cores
             gameMaster.Render3D(hybridRenderer, vpMat, engine.world.sunLight.direction);
+
+            // Resolve HDR + half-res Bloom + ACES/sRGB tone-mapping before HUD overlay
+            hybridRenderer.EndHDRScenePass();
 
             // Draw HUD into transparent buffer (cached at ~20 Hz in Play Mode to eliminate 8.3 MB/frame CPU clear + PCIe upload bottleneck)
             bool refreshHudPixels = (totalFramesRendered % 3 == 0) ||

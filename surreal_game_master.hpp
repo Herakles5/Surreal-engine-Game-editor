@@ -235,15 +235,9 @@ public:
 
     // ---------- Initialize Aion as In-Game Player Character ----------
     bool InitAionPlayer(SurrealEngine& engine, SurrealEditor& editor, const std::string& modelPath, const Vec3& spawnOrigin) {
-        std::string actualPath = modelPath;
+        std::string actualPath = surreal::paths::ResolveAsset(modelPath);
         if (!std::filesystem::exists(actualPath)) {
-            actualPath = "/root/coding/Surreal-engine-Game-editor/" + modelPath;
-        }
-        if (!std::filesystem::exists(actualPath)) {
-            actualPath = "/root/coding/MeinOS/surreal_engine/" + modelPath;
-        }
-        if (!std::filesystem::exists(actualPath)) {
-            actualPath = "/root/coding/MeinOS/avatar/scene.gltf";
+            actualPath = surreal::paths::GetDefaultAvatarPath();
         }
 
         aionAgent.character = std::make_shared<SkeletalMeshInstance>();
