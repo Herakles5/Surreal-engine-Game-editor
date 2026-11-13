@@ -15,6 +15,7 @@ test_surreal_gltf
 test_surreal_interactive
 test_texture_bake
 test_texture_inspect
+test_surreal_suite
 build/
 bin/
 

@@ -14,7 +14,6 @@ echo "  AION SURREAL 3D ENGINE - LINUX DISTRIBUTION INSTALLER"
 echo "  Target Prefix: ${PREFIX}"
 echo "===================================================================="
 
-# Check permissions
 if [ "$EUID" -ne 0 ]; then
     echo "[!] Note: Installing to ${PREFIX} typically requires root / sudo."
 fi
@@ -26,12 +25,24 @@ mkdir -p "${PREFIX}/bin"
 mkdir -p "${PREFIX}/share/surreal/avatar"
 mkdir -p "${PREFIX}/lib/pkgconfig"
 
-# 2. Compile Engine Binaries
-echo "[*] Building Surreal Studio & Dojo Editor (AVX2 + OpenGL 4.6)..."
-g++ -O3 -mavx2 -mfma -std=c++17 "${SRC_DIR}/surreal_live_dojo.cpp" -lSDL2 -lGL -lm -lpthread -o "${SRC_DIR}/surreal_live_dojo"
+# 2. Compile Shared Third-Party Object & Engine Binaries
+echo "[*] Building Shared Third-Party Object..."
+g++ -O3 -std=c++20 -c "${SRC_DIR}/surreal_third_party.cpp" -o "${SRC_DIR}/surreal_third_party.o"
+
+echo "[*] Building Surreal Studio & Dojo Editor (C++20 + AVX2 + OpenGL 4.6 + OpenMP)..."
+g++ -O3 -mavx2 -mfma -fopenmp -pthread -std=c++20 -DSURREAL_EXTERNAL_THIRD_PARTY_IMPL \
+    "${SRC_DIR}/surreal_live_dojo.cpp" "${SRC_DIR}/surreal_third_party.o" \
+    -lSDL2 -lGL -ldl -lm -fopenmp -o "${SRC_DIR}/surreal_live_dojo"
 
 echo "[*] Building Surreal Benchmark Utility..."
-g++ -O3 -mavx2 -mfma -std=c++17 "${SRC_DIR}/test_surreal_benchmark.cpp" -lSDL2 -lGL -lm -lpthread -o "${SRC_DIR}/test_surreal_benchmark"
+g++ -O3 -mavx2 -mfma -fopenmp -pthread -std=c++20 -DSURREAL_EXTERNAL_THIRD_PARTY_IMPL \
+    "${SRC_DIR}/test_surreal_benchmark.cpp" "${SRC_DIR}/surreal_third_party.o" \
+    -lSDL2 -lGL -lm -pthread -fopenmp -o "${SRC_DIR}/test_surreal_benchmark"
+
+echo "[*] Building Photo-to-3D Utility..."
+g++ -O3 -mavx2 -mfma -fopenmp -pthread -std=c++20 -DSURREAL_EXTERNAL_THIRD_PARTY_IMPL \
+    "${SRC_DIR}/photo3d_preview.cpp" "${SRC_DIR}/surreal_third_party.o" \
+    -lm -pthread -fopenmp -o "${SRC_DIR}/surreal-photo3d"
 
 # 3. Install Headers
 echo "[*] Installing C++ headers to ${PREFIX}/include/surreal/..."
@@ -44,12 +55,19 @@ echo "[*] Installing binaries to ${PREFIX}/bin/..."
 install -m 755 "${SRC_DIR}/surreal_live_dojo" "${PREFIX}/bin/surreal-editor"
 install -m 755 "${SRC_DIR}/surreal_live_dojo" "${PREFIX}/bin/surreal-dojo"
 install -m 755 "${SRC_DIR}/test_surreal_benchmark" "${PREFIX}/bin/surreal-bench"
+install -m 755 "${SRC_DIR}/surreal-photo3d" "${PREFIX}/bin/surreal-photo3d"
 
 # 5. Install PBR Assets
 echo "[*] Linking PBR 3D Assets to ${PREFIX}/share/surreal/..."
-if [ -d "/root/coding/MeinOS/avatar" ]; then
+AVATAR_SRC=""
+if [ -d "${SRC_DIR}/../avatar" ]; then
+    AVATAR_SRC="${SRC_DIR}/../avatar"
+elif [ -d "/root/coding/MeinOS/avatar" ]; then
+    AVATAR_SRC="/root/coding/MeinOS/avatar"
+fi
+if [ -n "${AVATAR_SRC}" ]; then
     rm -rf "${PREFIX}/share/surreal/avatar"
-    ln -s /root/coding/MeinOS/avatar "${PREFIX}/share/surreal/avatar"
+    ln -s "$(cd "${AVATAR_SRC}" && pwd)" "${PREFIX}/share/surreal/avatar"
 fi
 
 # 6. Generate pkg-config Configuration
@@ -62,23 +80,23 @@ libdir=\${prefix}/lib
 
 Name: surreal
 Description: Sovereign Bare-Metal & Hybrid 3D Game Engine for CosmOS & Linux
-Version: 1.0.0
-Cflags: -I\${includedir} -I\${includedir}/surreal -mavx2 -mfma -O3 -std=c++17
-Libs: -lSDL2 -lGL -lm -lpthread
+Version: 2.0.0
+Cflags: -I\${includedir} -I\${includedir}/surreal -mavx2 -mfma -fopenmp -O3 -std=c++20
+Libs: -lSDL2 -lGL -lm -pthread -fopenmp
 EOF
 
-# Ensure PKG_CONFIG_PATH contains target lib/pkgconfig
 export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
 
 # 7. Verification: Compile Standalone Example Game
 echo "[*] Testing installation by building examples/simple_game.cpp with pkg-config..."
 if [ -f "${SRC_DIR}/examples/simple_game.cpp" ]; then
-    g++ -O3 -mavx2 -mfma -std=c++17 "${SRC_DIR}/examples/simple_game.cpp" $(pkg-config --cflags --libs surreal) -o "${SRC_DIR}/examples/simple_game"
+    g++ -O3 -mavx2 -mfma -fopenmp -std=c++20 "${SRC_DIR}/examples/simple_game.cpp" $(pkg-config --cflags --libs surreal) -o "${SRC_DIR}/examples/simple_game"
     echo "[✓] Standalone example game compiled successfully!"
 fi
 
 echo "===================================================================="
 echo "  SURREAL 3D ENGINE INSTALLATION COMPLETE!"
-echo "  Run 'surreal-editor' to launch the 3D Studio & Live Dojo"
-echo "  Run 'surreal-bench' to launch the Bare-Metal AVX2 Benchmark"
+echo "  Run 'surreal-editor'  to launch the 3D Studio & Live Dojo"
+echo "  Run 'surreal-bench'   to launch the Bare-Metal AVX2 Benchmark"
+echo "  Run 'surreal-photo3d' to convert photos into 3D preview renders"
 echo "===================================================================="
