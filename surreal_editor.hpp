@@ -15,6 +15,8 @@
 #include "surreal_model_loader.hpp"
 #include "surreal_image3d.hpp"
 #include "surreal_auto_rig.hpp"
+#include "surreal_paths.hpp"
+#include "surreal_json.hpp"
 #include <vector>
 #include <string>
 #include <fstream>
@@ -22,6 +24,7 @@
 #include <iostream>
 #include <algorithm>
 #include <iomanip>
+#include <functional>
 
 namespace Surreal {
 
@@ -41,11 +44,13 @@ struct EditableEntity {
     float roughness;
     bool isStaticTerrain;
     bool isCharacter;
+    std::string assetPath;
+    ModelPresetType presetType;
 
     EditableEntity()
         : id(INVALID_ENTITY), name("Entity"), position(0,0,0), scale(1,1,1), yaw(0.0f),
           color(1,1,1), metallic(0.1f), roughness(0.5f),
-          isStaticTerrain(false), isCharacter(false) {}
+          isStaticTerrain(false), isCharacter(false), presetType(ModelPresetType::CRATE) {}
 };
 
 class SurrealEditor {

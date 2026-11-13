@@ -118,6 +118,19 @@ public:
         return id;
     }
 
+    void RestoreEntity(EntityID id, const std::string& name = "Entity") {
+        if (entityNames.find(id) == entityNames.end()) {
+            entities.push_back(id);
+        }
+        entityNames[id] = name;
+        if (transforms.find(id) == transforms.end()) {
+            transforms[id] = TransformComponent();
+        }
+        if (id >= nextEntityId) {
+            nextEntityId = id + 1;
+        }
+    }
+
     void DestroyEntity(EntityID id) {
         entityNames.erase(id);
         transforms.erase(id);
