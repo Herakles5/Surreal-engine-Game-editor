@@ -32,6 +32,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <errno.h>
 #endif
 
@@ -64,15 +65,36 @@ public:
         while (!feed.empty() && feed.front().ttl <= 0.0f) feed.pop_front();
 
         if (!connected) {
-            retryTimer -= dt;
-            if (retryTimer <= 0.0f) {
-                retryTimer = 5.0f;
-                if (Connect()) {
-                    Push("AION NEXUS LINK ONLINE", 0xFF00FF99, 6.0f);
-                    SendRaw("{\"cmd\":\"SURREAL_HELLO\",\"app\":\"surreal_studio\"}");
+            if (connecting && fd >= 0) {
+                connectTimer += dt;
+                pollfd pfd = {fd, POLLOUT | POLLERR | POLLHUP, 0};
+                int pr = ::poll(&pfd, 1, 0);
+                if (pr > 0) {
+                    int err = 0;
+                    socklen_t len = sizeof(err);
+                    if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0 && !(pfd.revents & (POLLERR | POLLHUP))) {
+                        connecting = false;
+                        connected = true;
+                        Push("AION NEXUS LINK ONLINE", 0xFF00FF99, 6.0f);
+                        SendRaw("{\"cmd\":\"SURREAL_HELLO\",\"app\":\"surreal_studio\"}");
+                    } else {
+                        Disconnect();
+                    }
+                } else if (pr < 0 || connectTimer > 2.5f) {
+                    Disconnect();
                 }
+                if (!connected) return;
+            } else {
+                retryTimer -= dt;
+                if (retryTimer <= 0.0f) {
+                    retryTimer = 5.0f;
+                    if (Connect()) {
+                        Push("AION NEXUS LINK ONLINE", 0xFF00FF99, 6.0f);
+                        SendRaw("{\"cmd\":\"SURREAL_HELLO\",\"app\":\"surreal_studio\"}");
+                    }
+                }
+                if (!connected) return;
             }
-            return;
         }
 
         Poll();
@@ -165,11 +187,15 @@ public:
         if (fd >= 0) { ::close(fd); fd = -1; }
 #endif
         connected = false;
+        connecting = false;
+        connectTimer = 0.0f;
         rx.clear();
     }
 
 private:
     int fd = -1;
+    bool connecting = false;
+    float connectTimer = 0.0f;
     float retryTimer = 0.0f;
     float telemetryTimer = 1.0f;
     std::string rx;
@@ -215,29 +241,46 @@ private:
     bool Connect() {
 #ifndef _WIN32
         Disconnect();
-        int s = ::socket(AF_UNIX, SOCK_STREAM, 0);
-        if (s < 0) return false;
+        auto tryNonBlockingConnect = [&](int domain, const sockaddr* sa, socklen_t salen) -> int {
+            int s = ::socket(domain, SOCK_STREAM, 0);
+            if (s < 0) return -1;
+            int flags = ::fcntl(s, F_GETFL, 0);
+            if (flags >= 0) ::fcntl(s, F_SETFL, flags | O_NONBLOCK);
+            int rc = ::connect(s, sa, salen);
+            if (rc == 0) {
+                fd = s;
+                connected = true;
+                connecting = false;
+                return 1;
+            }
+            if (errno == EINPROGRESS) {
+                fd = s;
+                connected = false;
+                connecting = true;
+                connectTimer = 0.0f;
+                return 0; // Asynchronous connect in flight
+            }
+            ::close(s);
+            return -1;
+        };
+
         sockaddr_un addr;
         std::memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
         const char* envPath = std::getenv("AION_NEXUS_SOCK"); // override for tests / custom setups
         std::strncpy(addr.sun_path, envPath ? envPath : "/tmp/aion_nexus.sock", sizeof(addr.sun_path) - 1);
-        if (::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-            ::close(s);
-            // TCP fallback
-            s = ::socket(AF_INET, SOCK_STREAM, 0);
-            if (s < 0) return false;
-            sockaddr_in in;
-            std::memset(&in, 0, sizeof(in));
-            in.sin_family = AF_INET;
-            in.sin_port = htons(9099);
-            inet_pton(AF_INET, "127.0.0.1", &in.sin_addr);
-            if (::connect(s, reinterpret_cast<sockaddr*>(&in), sizeof(in)) != 0) { ::close(s); return false; }
-        }
-        fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
-        fd = s;
-        connected = true;
-        return true;
+        int unixRc = tryNonBlockingConnect(AF_UNIX, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        if (unixRc == 1) return true;
+        if (unixRc == 0) return false;
+
+        // TCP fallback (non-blocking)
+        sockaddr_in in;
+        std::memset(&in, 0, sizeof(in));
+        in.sin_family = AF_INET;
+        in.sin_port = htons(9099);
+        inet_pton(AF_INET, "127.0.0.1", &in.sin_addr);
+        int tcpRc = tryNonBlockingConnect(AF_INET, reinterpret_cast<sockaddr*>(&in), sizeof(in));
+        return tcpRc == 1;
 #else
         return false;
 #endif
@@ -257,12 +300,25 @@ private:
 
     void Poll() {
 #ifndef _WIN32
+        if (!connected || fd < 0) return;
         char buf[1024];
         for (;;) {
             ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
-            if (n > 0) { rx.append(buf, static_cast<size_t>(n)); }
-            else if (n == 0) { Disconnect(); Push("AION NEXUS LINK CLOSED", 0xFFFF6666, 6.0f); return; }
-            else { if (errno != EAGAIN && errno != EWOULDBLOCK) Disconnect(); break; }
+            if (n > 0) {
+                rx.append(buf, static_cast<size_t>(n));
+                if (rx.size() > 65536) {
+                    size_t lastNl = rx.rfind('\n');
+                    if (lastNl != std::string::npos) rx.erase(0, lastNl + 1);
+                    else rx.clear();
+                }
+            } else if (n == 0) {
+                Disconnect();
+                Push("AION NEXUS LINK CLOSED", 0xFFFF6666, 6.0f);
+                return;
+            } else {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) Disconnect();
+                break;
+            }
         }
         size_t pos;
         while ((pos = rx.find('\n')) != std::string::npos) {

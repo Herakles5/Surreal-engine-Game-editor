@@ -9,14 +9,24 @@
 
 #include "surreal_math.hpp"
 #include "surreal_meshlet.hpp"
-#ifndef CGLTF_IMPLEMENTATION
-#define CGLTF_IMPLEMENTATION
+#if !defined(CGLTF_H_INCLUDED__)
+#  if !defined(SURREAL_EXTERNAL_THIRD_PARTY_IMPL) && !defined(CGLTF_IMPLEMENTATION)
+#    define CGLTF_IMPLEMENTATION
+#    include "cgltf.h"
+#    undef CGLTF_IMPLEMENTATION
+#  else
+#    include "cgltf.h"
+#  endif
 #endif
-#include "cgltf.h"
-#ifndef STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_IMPLEMENTATION
+#if !defined(STBI_INCLUDE_STB_IMAGE_H)
+#  if !defined(SURREAL_EXTERNAL_THIRD_PARTY_IMPL) && !defined(STB_IMAGE_IMPLEMENTATION)
+#    define STB_IMAGE_IMPLEMENTATION
+#    include "stb_image.h"
+#    undef STB_IMAGE_IMPLEMENTATION
+#  else
+#    include "stb_image.h"
+#  endif
 #endif
-#include "stb_image.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -167,7 +177,11 @@ public:
     std::shared_ptr<SurrealMesh> activeDeformedMesh;
 
     int activeClipIndex;
+    int previousClipIndex = -1;
     float currentTime;
+    float previousTime = 0.0f;
+    float crossFadeDuration = 0.0f;
+    float crossFadeElapsed = 0.0f;
     float playbackSpeed;
     bool isLooping;
     bool hasFootBaseOffset;
@@ -175,6 +189,8 @@ public:
     float footBaseOffset;
     bool isZUpModel;
     bool dirtyGPUUpload = true;
+    bool skinVBOUploaded = false;
+    uint64_t skinPaletteVersion = 0;
     float skinDtAccum = 0.0f;
 
     SkeletalMeshInstance()
@@ -188,29 +204,80 @@ public:
           isZUpModel(false),
           skinDtAccum(0.0f) {}
 
+    bool HasSkinData() const {
+        return !bindVertices.empty() && !skinMatrices.empty() && !joints.empty();
+    }
+
     void PlayClip(int index, bool loop = true) {
         if (index >= 0 && index < (int)clips.size()) {
             activeClipIndex = index;
+            previousClipIndex = -1;
+            crossFadeDuration = 0.0f;
+            crossFadeElapsed = 0.0f;
             currentTime = 0.0f;
             isLooping = loop;
             skinDtAccum = 1.0f;
         }
     }
 
+    void CrossFadeToClip(int index, float fadeDuration = 0.25f, bool loop = true) {
+        if (index < 0 || index >= (int)clips.size()) return;
+        if (index == activeClipIndex) {
+            isLooping = loop;
+            return;
+        }
+        if (fadeDuration <= 0.001f) {
+            PlayClip(index, loop);
+            return;
+        }
+        previousClipIndex = activeClipIndex;
+        previousTime = currentTime;
+        activeClipIndex = index;
+        currentTime = 0.0f;
+        crossFadeDuration = fadeDuration;
+        crossFadeElapsed = 0.0f;
+        isLooping = loop;
+        skinDtAccum = 1.0f;
+    }
+
     /**
-     * Advance animation time, sample keyframe curves, update hierarchy, and deform mesh
+     * Evaluate animation pose, cross-fade, FK hierarchy, and bone matrix palette only (for GPU skinning).
+     * Returns true if pose was updated.
      */
-    void Update(float dt) {
+    bool UpdatePoseOnly(float dt) {
+        if (joints.empty()) return false;
+
+        // Advance time even when bindVertices is empty? No, static clip-less check:
+        const bool hasActiveAnim = (activeClipIndex >= 0 && activeClipIndex < (int)clips.size() &&
+                                    clips[activeClipIndex].duration > 0.0f && !clips[activeClipIndex].channels.empty());
+        if (!hasActiveAnim && hasFootBaseOffset && staticAttributesInitialized) {
+            return false;
+        }
+
+        EvaluatePoseAndPalette(dt);
+        EnsureFootBaseOffsetInitialized();
+        skinPaletteVersion++;
+        return true;
+    }
+
+    /**
+     * Advance animation time, sample keyframe curves, update hierarchy, and deform mesh (CPU LBS fallback).
+     */
+    void Update(float dt, bool cpuDeform = true) {
         if (joints.empty() || bindVertices.empty()) return;
 
-        // Static / clip-less skeletal models: once calibrated on frame 1, joints never change — skip 86k-vertex CPU LBS & PCIe VBO upload!
         const bool hasActiveAnim = (activeClipIndex >= 0 && activeClipIndex < (int)clips.size() &&
                                     clips[activeClipIndex].duration > 0.0f && !clips[activeClipIndex].channels.empty());
         if (!hasActiveAnim && hasFootBaseOffset && staticAttributesInitialized) {
             return;
         }
 
-        // High-poly avatar cadence limiter: cap 25k+ vertex skinning to ~30 Hz
+        if (!cpuDeform) {
+            UpdatePoseOnly(dt);
+            return;
+        }
+
+        // High-poly avatar cadence limiter only for heavy CPU LBS path (GPU path runs at full framerate!)
         if (hasFootBaseOffset && staticAttributesInitialized && bindVertices.size() > 25000 && dt > 0.0f && dt < 0.032f) {
             skinDtAccum += dt;
             if (skinDtAccum < 0.032f) {
@@ -222,62 +289,118 @@ public:
             skinDtAccum = 0.0f;
         }
 
-        // 1. Reset all joints to base bind pose
-        for (auto& j : joints) {
-            j.localTranslation = j.baseTranslation;
-            j.localRotation = j.baseRotation;
-            j.localScale = j.baseScale;
+        EvaluatePoseAndPalette(dt);
+        skinPaletteVersion++;
+        DeformMesh();
+    }
+
+private:
+    static void AdvanceClipClock(const AnimationClip& clip, float dt, float speed, bool loop, float& inOutTime) {
+        if (clip.duration <= 0.0f) return;
+        inOutTime += dt * speed;
+        if (inOutTime > clip.duration) {
+            inOutTime = loop ? fmodf(inOutTime, clip.duration) : clip.duration;
+        } else if (inOutTime < 0.0f) {
+            inOutTime = 0.0f;
+        }
+    }
+
+    void SampleClipIntoPose(const AnimationClip& clip, float sampleTime,
+                            std::vector<Vec3>& tr, std::vector<Quat>& rot, std::vector<Vec3>& scl,
+                            std::vector<uint8_t>& explicitFlag) const {
+        for (const auto& chan : clip.channels) {
+            if (chan.jointIndex < 0 || chan.jointIndex >= (int)joints.size()) continue;
+            if (chan.keyTimes.empty()) continue;
+
+            if (chan.keyTimes.size() == 1) {
+                if (chan.target == ChannelTarget::TRANSLATION && !chan.vecValues.empty()) {
+                    tr[chan.jointIndex] = chan.vecValues[0];
+                    explicitFlag[chan.jointIndex] = 0;
+                } else if (chan.target == ChannelTarget::ROTATION && !chan.quatValues.empty()) {
+                    rot[chan.jointIndex] = chan.quatValues[0];
+                    explicitFlag[chan.jointIndex] = 0;
+                } else if (chan.target == ChannelTarget::SCALE && !chan.vecValues.empty()) {
+                    scl[chan.jointIndex] = chan.vecValues[0];
+                    explicitFlag[chan.jointIndex] = 0;
+                }
+                continue;
+            }
+
+            auto itUpper = std::upper_bound(chan.keyTimes.begin(), chan.keyTimes.end(), sampleTime);
+            size_t k = 0;
+            if (itUpper == chan.keyTimes.begin()) k = 0;
+            else if (itUpper == chan.keyTimes.end()) k = chan.keyTimes.size() - 2;
+            else k = static_cast<size_t>(std::distance(chan.keyTimes.begin(), itUpper)) - 1;
+
+            float t0 = chan.keyTimes[k];
+            float t1 = chan.keyTimes[k + 1];
+            float factor = (t1 > t0) ? std::clamp((sampleTime - t0) / (t1 - t0), 0.0f, 1.0f) : 0.0f;
+
+            if (chan.target == ChannelTarget::TRANSLATION && k + 1 < chan.vecValues.size()) {
+                tr[chan.jointIndex] = Lerp(chan.vecValues[k], chan.vecValues[k + 1], factor);
+                explicitFlag[chan.jointIndex] = 0;
+            } else if (chan.target == ChannelTarget::ROTATION && k + 1 < chan.quatValues.size()) {
+                rot[chan.jointIndex] = Slerp(chan.quatValues[k], chan.quatValues[k + 1], factor);
+                explicitFlag[chan.jointIndex] = 0;
+            } else if (chan.target == ChannelTarget::SCALE && k + 1 < chan.vecValues.size()) {
+                scl[chan.jointIndex] = Lerp(chan.vecValues[k], chan.vecValues[k + 1], factor);
+                explicitFlag[chan.jointIndex] = 0;
+            }
+        }
+    }
+
+    void EvaluatePoseAndPalette(float dt) {
+        const size_t jc = joints.size();
+        std::vector<Vec3> curTr(jc), prevTr(jc);
+        std::vector<Quat> curRot(jc), prevRot(jc);
+        std::vector<Vec3> curScl(jc), prevScl(jc);
+        std::vector<uint8_t> curExpl(jc), prevExpl(jc);
+
+        for (size_t i = 0; i < jc; ++i) {
+            curTr[i] = prevTr[i] = joints[i].baseTranslation;
+            curRot[i] = prevRot[i] = joints[i].baseRotation;
+            curScl[i] = prevScl[i] = joints[i].baseScale;
+            curExpl[i] = prevExpl[i] = joints[i].hasExplicitMatrix ? 1 : 0;
         }
 
-        // 2. Sample current active clip
         if (activeClipIndex >= 0 && activeClipIndex < (int)clips.size()) {
-            const AnimationClip& clip = clips[activeClipIndex];
-            if (clip.duration > 0.0f) {
-                currentTime += dt * playbackSpeed;
-                if (currentTime > clip.duration) {
-                    if (isLooping) {
-                        currentTime = fmodf(currentTime, clip.duration);
-                    } else {
-                        currentTime = clip.duration;
-                    }
-                }
+            const AnimationClip& curClip = clips[activeClipIndex];
+            AdvanceClipClock(curClip, dt, playbackSpeed, isLooping, currentTime);
+            SampleClipIntoPose(curClip, currentTime, curTr, curRot, curScl, curExpl);
+        }
 
-                for (const auto& chan : clip.channels) {
-                    if (chan.jointIndex < 0 || chan.jointIndex >= (int)joints.size()) continue;
-                    SkeletonJoint& joint = joints[chan.jointIndex];
-
-                    if (chan.keyTimes.size() < 2) continue;
-
-                    // O(log N) binary search for keyframe interval
-                    auto itUpper = std::upper_bound(chan.keyTimes.begin(), chan.keyTimes.end(), currentTime);
-                    size_t k = 0;
-                    if (itUpper == chan.keyTimes.begin()) {
-                        k = 0;
-                    } else if (itUpper == chan.keyTimes.end()) {
-                        k = chan.keyTimes.size() - 2;
-                    } else {
-                        k = static_cast<size_t>(std::distance(chan.keyTimes.begin(), itUpper)) - 1;
-                    }
-
-                    float t0 = chan.keyTimes[k];
-                    float t1 = chan.keyTimes[k + 1];
-                    float factor = (t1 > t0) ? std::clamp((currentTime - t0) / (t1 - t0), 0.0f, 1.0f) : 0.0f;
-
-                    if (chan.target == ChannelTarget::TRANSLATION && k < chan.vecValues.size() - 1) {
-                        joint.localTranslation = Lerp(chan.vecValues[k], chan.vecValues[k + 1], factor);
-                        joint.hasExplicitMatrix = false;
-                    } else if (chan.target == ChannelTarget::ROTATION && k < chan.quatValues.size() - 1) {
-                        joint.localRotation = Slerp(chan.quatValues[k], chan.quatValues[k + 1], factor);
-                        joint.hasExplicitMatrix = false;
-                    } else if (chan.target == ChannelTarget::SCALE && k < chan.vecValues.size() - 1) {
-                        joint.localScale = Lerp(chan.vecValues[k], chan.vecValues[k + 1], factor);
-                        joint.hasExplicitMatrix = false;
-                    }
+        bool blending = (previousClipIndex >= 0 && previousClipIndex < (int)clips.size() && crossFadeDuration > 0.001f);
+        if (blending) {
+            crossFadeElapsed += std::max(0.0f, dt);
+            if (crossFadeElapsed >= crossFadeDuration) {
+                previousClipIndex = -1;
+                crossFadeDuration = 0.0f;
+                crossFadeElapsed = 0.0f;
+                blending = false;
+            } else {
+                const AnimationClip& prevClip = clips[previousClipIndex];
+                AdvanceClipClock(prevClip, dt, playbackSpeed, true, previousTime);
+                SampleClipIntoPose(prevClip, previousTime, prevTr, prevRot, prevScl, prevExpl);
+                float u = std::clamp(crossFadeElapsed / crossFadeDuration, 0.0f, 1.0f);
+                float blend = u * u * (3.0f - 2.0f * u); // Smoothstep crossfade
+                for (size_t i = 0; i < jc; ++i) {
+                    joints[i].localTranslation = Lerp(prevTr[i], curTr[i], blend);
+                    joints[i].localRotation = Slerp(prevRot[i], curRot[i], blend);
+                    joints[i].localScale = Lerp(prevScl[i], curScl[i], blend);
+                    joints[i].hasExplicitMatrix = (curExpl[i] != 0 && prevExpl[i] != 0);
                 }
             }
         }
 
-        // 3. Forward Kinematics: Update Local & Global Joint Transforms (memoized O(N) evaluation)
+        if (!blending) {
+            for (size_t i = 0; i < jc; ++i) {
+                joints[i].localTranslation = curTr[i];
+                joints[i].localRotation = curRot[i];
+                joints[i].localScale = curScl[i];
+                joints[i].hasExplicitMatrix = (curExpl[i] != 0);
+            }
+        }
+
         for (auto& j : joints) {
             if (!j.hasExplicitMatrix) {
                 j.localMatrix = Mat4::Translation(j.localTranslation) *
@@ -286,15 +409,15 @@ public:
             }
         }
 
-        if (evalDone.size() != joints.size()) {
-            evalDone.resize(joints.size(), 0);
+        if (evalDone.size() != jc) {
+            evalDone.resize(jc, 0);
         } else {
             std::fill(evalDone.begin(), evalDone.end(), 0);
         }
         auto evalGlobal = [&](auto& self, int idx) -> void {
             if (evalDone[idx]) return;
             SkeletonJoint& j = joints[idx];
-            if (j.parentIndex >= 0 && j.parentIndex < (int)joints.size()) {
+            if (j.parentIndex >= 0 && j.parentIndex < (int)jc) {
                 self(self, j.parentIndex);
                 j.globalMatrix = joints[j.parentIndex].globalMatrix * j.localMatrix;
             } else {
@@ -302,40 +425,37 @@ public:
             }
             evalDone[idx] = 1;
         };
-        for (size_t i = 0; i < joints.size(); ++i) {
+        for (size_t i = 0; i < jc; ++i) {
             evalGlobal(evalGlobal, static_cast<int>(i));
         }
 
-        // 4. Compute Joint Matrix Palette
         if (!skinJointNodeIndices.empty()) {
             skinMatrices.resize(skinJointNodeIndices.size());
             for (size_t s = 0; s < skinJointNodeIndices.size(); ++s) {
                 int nodeIdx = skinJointNodeIndices[s];
-                if (nodeIdx >= 0 && nodeIdx < (int)joints.size()) {
+                if (nodeIdx >= 0 && nodeIdx < (int)jc) {
                     skinMatrices[s] = joints[nodeIdx].globalMatrix * skinJointIBMs[s];
                     joints[nodeIdx].skinMatrix = skinMatrices[s];
                 }
             }
         } else {
-            skinMatrices.resize(joints.size());
-            for (size_t i = 0; i < joints.size(); ++i) {
+            skinMatrices.resize(jc);
+            for (size_t i = 0; i < jc; ++i) {
                 joints[i].skinMatrix = joints[i].globalMatrix * joints[i].inverseBindMatrix;
                 skinMatrices[i] = joints[i].skinMatrix;
             }
         }
-
-        // 5. Linear Blend Skinning (LBS) on Mesh Vertices
-        DeformMesh();
     }
 
-private:
-    void DeformMesh() {
-        if (!activeDeformedMesh) return;
+    void EnsureFootBaseOffsetInitialized() {
+        if (!activeDeformedMesh || bindVertices.empty()) return;
         const size_t vertCount = bindVertices.size();
         bool needsBoundsInit = false;
         if (activeDeformedMesh->vertices.size() != vertCount || !staticAttributesInitialized) {
             activeDeformedMesh->vertices.resize(vertCount);
             for (size_t i = 0; i < vertCount; ++i) {
+                activeDeformedMesh->vertices[i].position = bindVertices[i].position;
+                activeDeformedMesh->vertices[i].normal = bindVertices[i].normal;
                 activeDeformedMesh->vertices[i].u = bindVertices[i].u;
                 activeDeformedMesh->vertices[i].v = bindVertices[i].v;
                 activeDeformedMesh->vertices[i].color = bindVertices[i].color;
@@ -343,12 +463,8 @@ private:
             staticAttributesInitialized = true;
             needsBoundsInit = true;
         }
-
         const size_t numSkinMatrices = skinMatrices.size();
-        if (numSkinMatrices == 0) return;
-
-        // Calibrate foot base offset once at initialization to place character feet precisely on Y=0
-        if (!hasFootBaseOffset) {
+        if (!hasFootBaseOffset && numSkinMatrices > 0) {
             float minGroundY = 1e9f;
             for (size_t i = 0; i < vertCount; ++i) {
                 const SkinnedVertex3D& b = bindVertices[i];
@@ -362,10 +478,21 @@ private:
                 }
                 if (sy < minGroundY) minGroundY = sy;
             }
-            footBaseOffset = minGroundY;
+            footBaseOffset = std::isfinite(minGroundY) ? minGroundY : 0.0f;
             hasFootBaseOffset = true;
             needsBoundsInit = true;
         }
+        if (needsBoundsInit) {
+            activeDeformedMesh->CalculateBounds();
+        }
+    }
+
+    void DeformMesh() {
+        if (!activeDeformedMesh) return;
+        EnsureFootBaseOffsetInitialized();
+        const size_t vertCount = bindVertices.size();
+        const size_t numSkinMatrices = skinMatrices.size();
+        if (numSkinMatrices == 0) return;
 
         const float footOffset = footBaseOffset;
         const Mat4* __restrict skinMatPtr = skinMatrices.data();
@@ -493,22 +620,25 @@ public:
             }
         }
 
-        // 2. Parse Skin Joint Mapping & Inverse Bind Matrices
+        // 2. Parse Multi-Skin Joint Mapping & Inverse Bind Matrices
+        std::vector<size_t> skinOffsets(data->skins_count, 0);
         if (data->skins_count > 0) {
-            const cgltf_skin& skin = data->skins[0];
-            outInstance.skinJointNodeIndices.resize(skin.joints_count);
-            outInstance.skinJointIBMs.resize(skin.joints_count, Mat4::Identity());
-
-            for (cgltf_size j = 0; j < skin.joints_count; ++j) {
-                outInstance.skinJointNodeIndices[j] = static_cast<int>(skin.joints[j] - data->nodes);
-                if (skin.inverse_bind_matrices) {
-                    float ibm[16];
-                    cgltf_accessor_read_float(skin.inverse_bind_matrices, j, ibm, 16);
-                    for (int r = 0; r < 4; ++r) {
-                        for (int c = 0; c < 4; ++c) {
-                            outInstance.skinJointIBMs[j].m[r][c] = ibm[c * 4 + r];
+            for (cgltf_size s = 0; s < data->skins_count; ++s) {
+                skinOffsets[s] = outInstance.skinJointNodeIndices.size();
+                const cgltf_skin& skin = data->skins[s];
+                for (cgltf_size j = 0; j < skin.joints_count; ++j) {
+                    outInstance.skinJointNodeIndices.push_back(static_cast<int>(skin.joints[j] - data->nodes));
+                    Mat4 ibm = Mat4::Identity();
+                    if (skin.inverse_bind_matrices) {
+                        float ibmRaw[16];
+                        cgltf_accessor_read_float(skin.inverse_bind_matrices, j, ibmRaw, 16);
+                        for (int r = 0; r < 4; ++r) {
+                            for (int c = 0; c < 4; ++c) {
+                                ibm.m[r][c] = ibmRaw[c * 4 + r];
+                            }
                         }
                     }
+                    outInstance.skinJointIBMs.push_back(ibm);
                 }
             }
         }
@@ -621,6 +751,13 @@ public:
 
                 float m[16];
                 cgltf_node_transform_world(node, m);
+                Mat4 nodeWorld = Mat4::Identity();
+                for (int r = 0; r < 4; ++r) {
+                    for (int c = 0; c < 4; ++c) {
+                        nodeWorld.m[r][c] = m[c * 4 + r];
+                    }
+                }
+                Mat4 nodeNormalMat = nodeWorld.InverseTranspose3x3();
 
                 cgltf_mesh* gMesh = node->mesh;
                 for (cgltf_size p = 0; p < gMesh->primitives_count; ++p) {
@@ -672,6 +809,23 @@ public:
                         if (prim.material->has_emissive_strength) {
                             sub.emissiveStrength = prim.material->emissive_strength.emissive_strength;
                         }
+                        sub.doubleSided = (prim.material->double_sided != 0);
+                        sub.alphaCutoff = prim.material->alpha_cutoff;
+                        if (prim.material->alpha_mode == cgltf_alpha_mode_mask) sub.alphaMode = PBRMaterial::AlphaMode::MASK_MODE;
+                        else if (prim.material->alpha_mode == cgltf_alpha_mode_blend) sub.alphaMode = PBRMaterial::AlphaMode::BLEND_MODE;
+
+                        if (prim.material->normal_texture.texture && prim.material->normal_texture.texture->image) {
+                            RawTex rt = getTex(prim.material->normal_texture.texture->image);
+                            sub.normalTexW = rt.w; sub.normalTexH = rt.h; sub.normalTexRGBA = rt.rgba;
+                        }
+                        if (prim.material->occlusion_texture.texture && prim.material->occlusion_texture.texture->image) {
+                            RawTex rt = getTex(prim.material->occlusion_texture.texture->image);
+                            sub.aoTexW = rt.w; sub.aoTexH = rt.h; sub.aoTexRGBA = rt.rgba;
+                        }
+                        if (prim.material->emissive_texture.texture && prim.material->emissive_texture.texture->image) {
+                            RawTex rt = getTex(prim.material->emissive_texture.texture->image);
+                            sub.emissiveTexW = rt.w; sub.emissiveTexH = rt.h; sub.emissiveTexRGBA = rt.rgba;
+                        }
 
                         if (prim.material->has_pbr_metallic_roughness) {
                             const auto& pbr = prim.material->pbr_metallic_roughness;
@@ -692,6 +846,10 @@ public:
                                     uvOffset[0] = pbr.base_color_texture.transform.offset[0];
                                     uvOffset[1] = pbr.base_color_texture.transform.offset[1];
                                 }
+                            }
+                            if (pbr.metallic_roughness_texture.texture && pbr.metallic_roughness_texture.texture->image) {
+                                RawTex rt = getTex(pbr.metallic_roughness_texture.texture->image);
+                                sub.mrTexW = rt.w; sub.mrTexH = rt.h; sub.mrTexRGBA = rt.rgba;
                             }
                         } else if (prim.material->has_pbr_specular_glossiness) {
                             const auto& sg = prim.material->pbr_specular_glossiness;
@@ -779,12 +937,7 @@ public:
                         if (normAcc) {
                             float ln[3];
                             cgltf_accessor_read_float(normAcc, v, ln, 3);
-                            float nx = m[0]*ln[0] + m[4]*ln[1] + m[8]*ln[2];
-                            float ny = m[1]*ln[0] + m[5]*ln[1] + m[9]*ln[2];
-                            float nz = m[2]*ln[0] + m[6]*ln[1] + m[10]*ln[2];
-                            float len = sqrtf(nx*nx + ny*ny + nz*nz);
-                            if (len > 1e-6f) { nx /= len; ny /= len; nz /= len; }
-                            vert.normal = Vec3(nx, ny, nz);
+                            vert.normal = nodeNormalMat.TransformDirection(Vec3(ln[0], ln[1], ln[2])).Normalized();
                         } else {
                             vert.normal = Vec3(0, 1.0f, 0);
                         }
@@ -831,6 +984,12 @@ public:
 
                 auto sameMat = [&](const SubMesh& a, const SubMesh& b) -> bool {
                     return a.texRGBA.get() == b.texRGBA.get() &&
+                           a.normalTexRGBA.get() == b.normalTexRGBA.get() &&
+                           a.mrTexRGBA.get() == b.mrTexRGBA.get() &&
+                           a.aoTexRGBA.get() == b.aoTexRGBA.get() &&
+                           a.emissiveTexRGBA.get() == b.emissiveTexRGBA.get() &&
+                           a.alphaMode == b.alphaMode &&
+                           a.doubleSided == b.doubleSided &&
                            std::abs(a.albedo.r - b.albedo.r) < 0.01f &&
                            std::abs(a.albedo.g - b.albedo.g) < 0.01f &&
                            std::abs(a.albedo.b - b.albedo.b) < 0.01f &&
@@ -845,6 +1004,9 @@ public:
                     const SubMesh& a = subs[ia];
                     const SubMesh& b = subs[ib];
                     if (a.texRGBA.get() != b.texRGBA.get()) return a.texRGBA.get() < b.texRGBA.get();
+                    if (a.normalTexRGBA.get() != b.normalTexRGBA.get()) return a.normalTexRGBA.get() < b.normalTexRGBA.get();
+                    if (a.mrTexRGBA.get() != b.mrTexRGBA.get()) return a.mrTexRGBA.get() < b.mrTexRGBA.get();
+                    if (a.alphaMode != b.alphaMode) return static_cast<int>(a.alphaMode) < static_cast<int>(b.alphaMode);
                     if (std::abs(a.emissive.r - b.emissive.r) >= 0.01f) return a.emissive.r < b.emissive.r;
                     if (std::abs(a.albedo.r - b.albedo.r) >= 0.01f) return a.albedo.r < b.albedo.r;
                     return ia < ib;
@@ -908,10 +1070,43 @@ public:
             return true;
         }
 
-        // 5. Parse Mesh Vertices with Joint Indices & Weights for Skinned Avatars
+        // 5. Parse Scene Nodes & Mesh Primitives (supports multi-skin + bone-attached rigid accessories)
+        std::vector<int> rigidNodeSkinSlot(data->nodes_count, -1);
+        auto getOrCreateRigidBoneSlot = [&](int nodeIdx) -> int {
+            if (nodeIdx < 0 || nodeIdx >= (int)data->nodes_count) return 0;
+            if (rigidNodeSkinSlot[nodeIdx] >= 0) return rigidNodeSkinSlot[nodeIdx];
+            int slot = static_cast<int>(outInstance.skinJointNodeIndices.size());
+            outInstance.skinJointNodeIndices.push_back(nodeIdx);
+            outInstance.skinJointIBMs.push_back(Mat4::Identity());
+            rigidNodeSkinSlot[nodeIdx] = slot;
+            return slot;
+        };
+
+        auto isStudioFloorHelper = [](const char* nName) -> bool {
+            if (!nName) return false;
+            std::string s = nName;
+            for (char& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            return (s.find("floor") != std::string::npos ||
+                    s.find("backdrop") != std::string::npos ||
+                    s.find("studio") != std::string::npos ||
+                    s.find("stage") != std::string::npos ||
+                    s.find("pedestal") != std::string::npos ||
+                    s.find("fog") != std::string::npos);
+        };
+
         uint32_t vertexBase = 0;
-        for (cgltf_size m = 0; m < data->meshes_count; ++m) {
-            const cgltf_mesh& gMesh = data->meshes[m];
+        for (cgltf_size nIdx = 0; nIdx < data->nodes_count; ++nIdx) {
+            cgltf_node* gNode = &data->nodes[nIdx];
+            if (!gNode->mesh) continue;
+            if (isStudioFloorHelper(gNode->name)) continue;
+
+            const cgltf_mesh& gMesh = *gNode->mesh;
+            size_t nodeSkinOffset = 0;
+            if (gNode->skin) {
+                size_t sIdx = static_cast<size_t>(gNode->skin - data->skins);
+                if (sIdx < skinOffsets.size()) nodeSkinOffset = skinOffsets[sIdx];
+            }
+
             for (cgltf_size p = 0; p < gMesh.primitives_count; ++p) {
                 const cgltf_primitive& prim = gMesh.primitives[p];
                 if (prim.type != cgltf_primitive_type_triangles) continue;
@@ -921,10 +1116,36 @@ public:
                 float baseFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
                 if (prim.material) {
+                    sub.emissive = ColorRGB(
+                        prim.material->emissive_factor[0],
+                        prim.material->emissive_factor[1],
+                        prim.material->emissive_factor[2]
+                    );
+                    if (prim.material->has_emissive_strength) {
+                        sub.emissiveStrength = prim.material->emissive_strength.emissive_strength;
+                    }
+                    sub.doubleSided = (prim.material->double_sided != 0);
+                    sub.alphaCutoff = prim.material->alpha_cutoff;
+                    if (prim.material->alpha_mode == cgltf_alpha_mode_mask) sub.alphaMode = PBRMaterial::AlphaMode::MASK_MODE;
+                    else if (prim.material->alpha_mode == cgltf_alpha_mode_blend) sub.alphaMode = PBRMaterial::AlphaMode::BLEND_MODE;
+
+                    if (prim.material->normal_texture.texture && prim.material->normal_texture.texture->image) {
+                        RawTex rt = getTex(prim.material->normal_texture.texture->image);
+                        sub.normalTexW = rt.w; sub.normalTexH = rt.h; sub.normalTexRGBA = rt.rgba;
+                    }
+                    if (prim.material->occlusion_texture.texture && prim.material->occlusion_texture.texture->image) {
+                        RawTex rt = getTex(prim.material->occlusion_texture.texture->image);
+                        sub.aoTexW = rt.w; sub.aoTexH = rt.h; sub.aoTexRGBA = rt.rgba;
+                    }
+                    if (prim.material->emissive_texture.texture && prim.material->emissive_texture.texture->image) {
+                        RawTex rt = getTex(prim.material->emissive_texture.texture->image);
+                        sub.emissiveTexW = rt.w; sub.emissiveTexH = rt.h; sub.emissiveTexRGBA = rt.rgba;
+                    }
+
                     if (prim.material->has_pbr_metallic_roughness) {
                         const auto& pbr = prim.material->pbr_metallic_roughness;
                         if (pbr.base_color_factor[3] < 0.05f && (!pbr.base_color_texture.texture || !pbr.base_color_texture.texture->image)) {
-                            continue; // Skip invisible volume / fog helper
+                            continue;
                         }
                         baseFactor[0] = pbr.base_color_factor[0];
                         baseFactor[1] = pbr.base_color_factor[1];
@@ -939,6 +1160,10 @@ public:
                             sub.texWidth = rt.w;
                             sub.texHeight = rt.h;
                             sub.texRGBA = rt.rgba;
+                        }
+                        if (pbr.metallic_roughness_texture.texture && pbr.metallic_roughness_texture.texture->image) {
+                            RawTex rt = getTex(pbr.metallic_roughness_texture.texture->image);
+                            sub.mrTexW = rt.w; sub.mrTexH = rt.h; sub.mrTexRGBA = rt.rgba;
                         }
                     } else if (prim.material->has_pbr_specular_glossiness) {
                         const auto& sg = prim.material->pbr_specular_glossiness;
@@ -979,9 +1204,16 @@ public:
 
                 if (!posAcc) continue;
 
-                // In skinned models, skip unskinned background/floor/pedestal/plane helper meshes (e.g. Sketchfab studio floor)
-                if (data->skins_count > 0 && !jointAcc) {
-                    continue;
+                // Bone-attached rigid meshes vs unparented studio helper quads
+                bool attachRigidToNode = false;
+                int rigidSlot = 0;
+                if (!jointAcc) {
+                    if (gNode->parent != nullptr) {
+                        attachRigidToNode = true;
+                        rigidSlot = getOrCreateRigidBoneSlot(static_cast<int>(nIdx));
+                    } else {
+                        continue; // Unparented static studio floor/prop inside skinned file
+                    }
                 }
 
                 size_t startIdx = outInstance.bindVertices.size();
@@ -1006,7 +1238,6 @@ public:
                         vert.u = uv[0]; vert.v = uv[1];
                     }
 
-                    // Sample Color from Diffuse/Albedo Texture for software fallback
                     float colR = sub.albedo.r, colG = sub.albedo.g, colB = sub.albedo.b;
                     if (sub.texRGBA && !sub.texRGBA->empty() && uvAcc) {
                         float u_wrap = vert.u - std::floor(vert.u);
@@ -1019,27 +1250,36 @@ public:
                         colG *= (*sub.texRGBA)[pIdx + 1] / 255.0f;
                         colB *= (*sub.texRGBA)[pIdx + 2] / 255.0f;
                     }
-
                     vert.color = Vec4(colR, colG, colB, 1.0f);
 
-                    if (jointAcc) {
+                    if (attachRigidToNode) {
+                        vert.joints[0] = static_cast<uint16_t>(rigidSlot);
+                        vert.joints[1] = vert.joints[2] = vert.joints[3] = 0;
+                        vert.weights[0] = 1.0f;
+                        vert.weights[1] = vert.weights[2] = vert.weights[3] = 0.0f;
+                    } else if (jointAcc) {
                         cgltf_uint j[4] = {0,0,0,0};
                         cgltf_accessor_read_uint(jointAcc, v, j, 4);
-                        vert.joints[0] = static_cast<uint16_t>(j[0]);
-                        vert.joints[1] = static_cast<uint16_t>(j[1]);
-                        vert.joints[2] = static_cast<uint16_t>(j[2]);
-                        vert.joints[3] = static_cast<uint16_t>(j[3]);
-                    }
+                        vert.joints[0] = static_cast<uint16_t>(nodeSkinOffset + j[0]);
+                        vert.joints[1] = static_cast<uint16_t>(nodeSkinOffset + j[1]);
+                        vert.joints[2] = static_cast<uint16_t>(nodeSkinOffset + j[2]);
+                        vert.joints[3] = static_cast<uint16_t>(nodeSkinOffset + j[3]);
 
-                    if (weightAcc) {
-                        float w[4] = {1,0,0,0};
-                        cgltf_accessor_read_float(weightAcc, v, w, 4);
-                        vert.weights[0] = w[0]; vert.weights[1] = w[1];
-                        vert.weights[2] = w[2]; vert.weights[3] = w[3];
+                        if (weightAcc) {
+                            float w[4] = {1,0,0,0};
+                            cgltf_accessor_read_float(weightAcc, v, w, 4);
+                            float wsum = w[0] + w[1] + w[2] + w[3];
+                            if (wsum > 1e-6f) {
+                                float inv = 1.0f / wsum;
+                                vert.weights[0] = w[0] * inv; vert.weights[1] = w[1] * inv;
+                                vert.weights[2] = w[2] * inv; vert.weights[3] = w[3] * inv;
+                            } else {
+                                vert.weights[0] = 1.0f; vert.weights[1] = vert.weights[2] = vert.weights[3] = 0.0f;
+                            }
+                        }
                     }
                 }
 
-                // Indices
                 if (prim.indices) {
                     sub.indexCount = static_cast<uint32_t>(prim.indices->count);
                     for (cgltf_size i = 0; i < prim.indices->count; ++i) {

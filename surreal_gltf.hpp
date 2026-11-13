@@ -7,12 +7,15 @@
  * ============================================================================
  */
 
-#ifndef SURREAL_EXTERNAL_THIRD_PARTY_IMPL
-#ifndef CGLTF_IMPLEMENTATION
-#define CGLTF_IMPLEMENTATION
+#if !defined(CGLTF_H_INCLUDED__)
+#  if !defined(SURREAL_EXTERNAL_THIRD_PARTY_IMPL) && !defined(CGLTF_IMPLEMENTATION)
+#    define CGLTF_IMPLEMENTATION
+#    include "cgltf.h"
+#    undef CGLTF_IMPLEMENTATION
+#  else
+#    include "cgltf.h"
+#  endif
 #endif
-#endif
-#include "cgltf.h"
 #include "surreal_math.hpp"
 #include "surreal_pbr.hpp"
 #include "surreal_meshlet.hpp"
