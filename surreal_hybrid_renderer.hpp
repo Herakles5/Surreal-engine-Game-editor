@@ -582,6 +582,157 @@ public:
         }
     }
 
+    void DestroyMesh(const SurrealMesh* meshPtr) {
+        if (!meshPtr || !isGLInitialized) return;
+        auto it = meshBuffers.find(meshPtr);
+        if (it != meshBuffers.end()) {
+            if (it->second.vbo) glDeleteBuffers(1, &it->second.vbo);
+            if (it->second.ebo) glDeleteBuffers(1, &it->second.ebo);
+            if (it->second.skinVbo) glDeleteBuffers(1, &it->second.skinVbo);
+            if (it->second.vao) glDeleteVertexArrays(1, &it->second.vao);
+            meshBuffers.erase(it);
+        }
+    }
+
+    void DeleteTextureChecked(GLuint& texId) {
+        if (texId != 0) {
+            if (isGLInitialized) glDeleteTextures(1, &texId);
+            ownedTextures.erase(texId);
+            texId = 0;
+        }
+    }
+
+    void DestroyMeshWithTextures(SurrealMesh* meshPtr) {
+        if (!meshPtr) return;
+        for (auto& sub : meshPtr->submeshes) {
+            DeleteTextureChecked(sub.textureId);
+            DeleteTextureChecked(sub.normalTextureId);
+            DeleteTextureChecked(sub.mrTextureId);
+            DeleteTextureChecked(sub.aoTextureId);
+            DeleteTextureChecked(sub.emissiveTextureId);
+        }
+        DestroyMesh(meshPtr);
+    }
+
+    void UploadBonePalette(const std::vector<Mat4>& skinMatrices) {
+        if (boneUBO == 0 || skinMatrices.empty()) return;
+        int count = std::min(static_cast<int>(skinMatrices.size()), MAX_GPU_BONES);
+        std::vector<float> packed(static_cast<size_t>(count) * 16);
+        for (int b = 0; b < count; ++b) {
+            const Mat4& m = skinMatrices[b];
+            float* dst = &packed[static_cast<size_t>(b) * 16];
+            // Transpose C++ row-major Mat4 into GLSL std140 column-major mat4
+            for (int c = 0; c < 4; ++c) {
+                for (int r = 0; r < 4; ++r) {
+                    dst[c * 4 + r] = m.m[r][c];
+                }
+            }
+        }
+        glBindBuffer(GL_UNIFORM_BUFFER, boneUBO);
+        glBufferSubData(GL_UNIFORM_BUFFER, 0, static_cast<GLsizeiptr>(count * 16 * sizeof(float)), packed.data());
+        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    }
+
+    template <typename SkinnedVertT>
+    bool EnsureSkinnedMeshUploaded(
+        const std::shared_ptr<SurrealMesh>& mesh,
+        const std::vector<SkinnedVertT>& bindVerts)
+    {
+        if (!mesh || bindVerts.empty()) return false;
+        const SurrealMesh* meshKey = mesh.get();
+        auto it = meshBuffers.find(meshKey);
+
+        std::vector<Vertex3D> bindV3D;
+        bool needVboUpload = false;
+        bool needSkinUpload = false;
+
+        if (it == meshBuffers.end()) {
+            GLMeshBuffer buf;
+            buf.vertexCount = bindVerts.size();
+            buf.indexCount = mesh->indices.size();
+            buf.skinVertexCount = bindVerts.size();
+            buf.hasBindPoseVBO = true;
+
+            bindV3D.resize(bindVerts.size());
+            std::vector<GPUSkinVertex> skinData(bindVerts.size());
+            for (size_t i = 0; i < bindVerts.size(); ++i) {
+                bindV3D[i] = Vertex3D(bindVerts[i].position, bindVerts[i].normal, bindVerts[i].u, bindVerts[i].v, bindVerts[i].color);
+                for (int k = 0; k < 4; ++k) {
+                    skinData[i].joints[k] = static_cast<uint32_t>(bindVerts[i].joints[k]);
+                    skinData[i].weights[k] = bindVerts[i].weights[k];
+                }
+            }
+
+            glGenVertexArrays(1, &buf.vao);
+            glBindVertexArray(buf.vao);
+
+            glGenBuffers(1, &buf.vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, buf.vbo);
+            glBufferData(GL_ARRAY_BUFFER, bindV3D.size() * sizeof(Vertex3D), bindV3D.data(), GL_STATIC_DRAW);
+
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, position));
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, normal));
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, u));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, color));
+            glEnableVertexAttribArray(3);
+
+            glGenBuffers(1, &buf.skinVbo);
+            glBindBuffer(GL_ARRAY_BUFFER, buf.skinVbo);
+            glBufferData(GL_ARRAY_BUFFER, skinData.size() * sizeof(GPUSkinVertex), skinData.data(), GL_STATIC_DRAW);
+
+            glVertexAttribIPointer(4, 4, GL_UNSIGNED_INT, sizeof(GPUSkinVertex), (void*)offsetof(GPUSkinVertex, joints));
+            glEnableVertexAttribArray(4);
+            glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(GPUSkinVertex), (void*)offsetof(GPUSkinVertex, weights));
+            glEnableVertexAttribArray(5);
+
+            glGenBuffers(1, &buf.ebo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf.ebo);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh->indices.size() * sizeof(uint32_t), mesh->indices.data(), GL_STATIC_DRAW);
+
+            glBindVertexArray(0);
+            meshBuffers[meshKey] = buf;
+            return true;
+        }
+
+        if (!it->second.hasBindPoseVBO || it->second.vertexCount != bindVerts.size()) needVboUpload = true;
+        if (it->second.skinVbo == 0 || it->second.skinVertexCount != bindVerts.size()) needSkinUpload = true;
+        if (!needVboUpload && !needSkinUpload) return true;
+
+        glBindVertexArray(it->second.vao);
+        if (needVboUpload) {
+            bindV3D.resize(bindVerts.size());
+            for (size_t i = 0; i < bindVerts.size(); ++i) {
+                bindV3D[i] = Vertex3D(bindVerts[i].position, bindVerts[i].normal, bindVerts[i].u, bindVerts[i].v, bindVerts[i].color);
+            }
+            glBindBuffer(GL_ARRAY_BUFFER, it->second.vbo);
+            glBufferData(GL_ARRAY_BUFFER, bindV3D.size() * sizeof(Vertex3D), bindV3D.data(), GL_STATIC_DRAW);
+            it->second.vertexCount = bindVerts.size();
+            it->second.hasBindPoseVBO = true;
+        }
+        if (needSkinUpload) {
+            std::vector<GPUSkinVertex> skinData(bindVerts.size());
+            for (size_t i = 0; i < bindVerts.size(); ++i) {
+                for (int k = 0; k < 4; ++k) {
+                    skinData[i].joints[k] = static_cast<uint32_t>(bindVerts[i].joints[k]);
+                    skinData[i].weights[k] = bindVerts[i].weights[k];
+                }
+            }
+            if (it->second.skinVbo == 0) glGenBuffers(1, &it->second.skinVbo);
+            glBindBuffer(GL_ARRAY_BUFFER, it->second.skinVbo);
+            glBufferData(GL_ARRAY_BUFFER, skinData.size() * sizeof(GPUSkinVertex), skinData.data(), GL_STATIC_DRAW);
+            glVertexAttribIPointer(4, 4, GL_UNSIGNED_INT, sizeof(GPUSkinVertex), (void*)offsetof(GPUSkinVertex, joints));
+            glEnableVertexAttribArray(4);
+            glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(GPUSkinVertex), (void*)offsetof(GPUSkinVertex, weights));
+            glEnableVertexAttribArray(5);
+            it->second.skinVertexCount = bindVerts.size();
+        }
+        glBindVertexArray(0);
+        return true;
+    }
+
     void EnsureMeshUploaded(
         const std::shared_ptr<SurrealMesh>& mesh,
         bool isDynamic = false,
@@ -595,6 +746,7 @@ public:
             GLMeshBuffer buf;
             buf.vertexCount = mesh->vertices.size();
             buf.indexCount = mesh->indices.size();
+            buf.hasBindPoseVBO = false;
 
             glGenVertexArrays(1, &buf.vao);
             glBindVertexArray(buf.vao);
@@ -609,24 +761,22 @@ public:
             glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh->indices.size() * sizeof(uint32_t),
                          mesh->indices.data(), GL_STATIC_DRAW);
 
-            // Attribute 0: Position (3 floats at offset 0)
             glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, position));
             glEnableVertexAttribArray(0);
-
-            // Attribute 1: Normal (3 floats at offset 16)
             glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, normal));
             glEnableVertexAttribArray(1);
-
-            // Attribute 2: UVs (2 floats at offset 32)
             glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, u));
             glEnableVertexAttribArray(2);
-
-            // Attribute 3: Vertex Color (4 floats at offset 48)
             glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, color));
             glEnableVertexAttribArray(3);
 
+            glDisableVertexAttribArray(4);
+            glDisableVertexAttribArray(5);
+            glBindVertexArray(0);
+
             meshBuffers[meshKey] = buf;
         } else if (isDynamic && uploadDynamicVBO) {
+            it->second.hasBindPoseVBO = false;
             glBindBuffer(GL_ARRAY_BUFFER, it->second.vbo);
             if (it->second.vertexCount == mesh->vertices.size() && it->second.indexCount == mesh->indices.size()) {
                 glBufferSubData(GL_ARRAY_BUFFER, 0, mesh->vertices.size() * sizeof(Vertex3D), mesh->vertices.data());
@@ -638,6 +788,30 @@ public:
                 glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh->indices.size() * sizeof(uint32_t), mesh->indices.data(), GL_STATIC_DRAW);
             }
         }
+    }
+
+    GLuint EnsureSubTextureUploaded(
+        GLuint& texId,
+        int w, int h,
+        const std::shared_ptr<std::vector<uint8_t>>& rgba,
+        bool isSRGB)
+    {
+        if (texId != 0) return texId;
+        if (!rgba || rgba->empty() || w <= 0 || h <= 0) return 0;
+
+        glGenTextures(1, &texId);
+        ownedTextures.insert(texId);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, -0.65f);
+        glTexParameterf(GL_TEXTURE_2D, 0x84FE, 16.0f);
+        GLint internalFmt = isSRGB ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+        glTexImage2D(GL_TEXTURE_2D, 0, internalFmt, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba->data());
+        glGenerateMipmap(GL_TEXTURE_2D);
+        return texId;
     }
 
     void RenderMesh(
@@ -655,87 +829,178 @@ public:
         if (it == meshBuffers.end()) return;
 
         glUseProgram(pbrProg);
+        if (uUseSkinningLoc != -1) glUniform1i(uUseSkinningLoc, 0);
+        if (uFootOffsetLoc != -1) glUniform1f(uFootOffsetLoc, 0.0f);
+        if (uAllowWetPuddlesLoc != -1) glUniform1i(uAllowWetPuddlesLoc, material.allowWetPuddles ? 1 : 0);
 
+        DrawMeshInternal(mesh, it->second, worldMat, vpMat, material);
+    }
+
+    template <typename SkelT>
+    void RenderSkinnedMesh(
+        const SkelT& skel,
+        const Mat4& worldMat,
+        const Mat4& vpMat,
+        const PBRMaterial& material)
+    {
+        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || !skel.activeDeformedMesh) return;
+        if (!EnsureSkinnedMeshUploaded(skel.activeDeformedMesh, skel.bindVertices)) return;
+        auto it = meshBuffers.find(skel.activeDeformedMesh.get());
+        if (it == meshBuffers.end()) return;
+
+        UploadBonePalette(skel.skinMatrices);
+        glUseProgram(pbrProg);
+        if (uUseSkinningLoc != -1) glUniform1i(uUseSkinningLoc, 1);
+        if (uFootOffsetLoc != -1) glUniform1f(uFootOffsetLoc, skel.footBaseOffset);
+        if (uAllowWetPuddlesLoc != -1) glUniform1i(uAllowWetPuddlesLoc, material.allowWetPuddles ? 1 : 0);
+
+        DrawMeshInternal(skel.activeDeformedMesh, it->second, worldMat, vpMat, material);
+
+        if (uUseSkinningLoc != -1) glUniform1i(uUseSkinningLoc, 0);
+    }
+
+private:
+    void DrawMeshInternal(
+        const std::shared_ptr<SurrealMesh>& mesh,
+        const GLMeshBuffer& buf,
+        const Mat4& worldMat,
+        const Mat4& vpMat,
+        const PBRMaterial& material)
+    {
         Mat4 mvpMat = vpMat * worldMat;
         glUniformMatrix4fv(uMVPLoc, 1, GL_TRUE, &mvpMat.m[0][0]);
         glUniformMatrix4fv(uModelLoc, 1, GL_TRUE, &worldMat.m[0][0]);
         if (uNormalMatLoc != -1) {
-            // Compute 3x3 inverse-transpose normal matrix once per draw call on CPU (instead of per-vertex on GPU!)
-            Mat4 invM = worldMat.Inversed();
+            Mat4 nm = worldMat.InverseTranspose3x3();
             float nMat[9] = {
-                invM.m[0][0], invM.m[1][0], invM.m[2][0],
-                invM.m[0][1], invM.m[1][1], invM.m[2][1],
-                invM.m[0][2], invM.m[1][2], invM.m[2][2]
+                nm.m[0][0], nm.m[0][1], nm.m[0][2],
+                nm.m[1][0], nm.m[1][1], nm.m[1][2],
+                nm.m[2][0], nm.m[2][1], nm.m[2][2]
             };
             glUniformMatrix3fv(uNormalMatLoc, 1, GL_TRUE, nMat);
         }
 
-        glBindVertexArray(it->second.vao);
+        glBindVertexArray(buf.vao);
 
         if (mesh->submeshes.empty()) {
+            if (material.doubleSided) glDisable(GL_CULL_FACE);
+            else { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); }
+
             glUniform1i(uHasTextureLoc, 0);
+            if (uHasNormalMapLoc != -1) glUniform1i(uHasNormalMapLoc, 0);
+            if (uHasMRMapLoc != -1) glUniform1i(uHasMRMapLoc, 0);
+            if (uHasAOMapLoc != -1) glUniform1i(uHasAOMapLoc, 0);
+            if (uHasEmissiveMapLoc != -1) glUniform1i(uHasEmissiveMapLoc, 0);
+            if (uAlphaModeLoc != -1) glUniform1i(uAlphaModeLoc, static_cast<int>(material.alphaMode));
+            if (uAlphaCutoffLoc != -1) glUniform1f(uAlphaCutoffLoc, material.alphaCutoff);
             glUniform3f(uAlbedoLoc, material.albedo.r, material.albedo.g, material.albedo.b);
             glUniform1f(uMetallicLoc, material.metallic);
             glUniform1f(uRoughnessLoc, material.roughness);
+            if (uAmbientOcclusionLoc != -1) glUniform1f(uAmbientOcclusionLoc, material.ambientOcclusion);
             if (uEmissiveLoc != -1) {
                 glUniform3f(uEmissiveLoc, material.emissive.r, material.emissive.g, material.emissive.b);
             }
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(it->second.indexCount), GL_UNSIGNED_INT, 0);
-        } else {
-            glActiveTexture(GL_TEXTURE0);
-            glUniform1i(uAlbedoMapLoc, 0);
-
-            for (auto& sub : mesh->submeshes) {
-                if (sub.indexCount == 0) continue;
-
-                // Lazy GPU texture upload with 16x Anisotropic Filtering & Crisp LOD Bias
-                if (sub.textureId == 0 && sub.texRGBA && !sub.texRGBA->empty()) {
-                    glGenTextures(1, &sub.textureId);
-                    glBindTexture(GL_TEXTURE_2D, sub.textureId);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, -0.65f);
-                    // Enable 16x Anisotropic Filtering (GL_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FE)
-                    glTexParameterf(GL_TEXTURE_2D, 0x84FE, 16.0f);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, sub.texWidth, sub.texHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, sub.texRGBA->data());
-                    glGenerateMipmap(GL_TEXTURE_2D);
-                }
-
-                if (sub.textureId != 0) {
-                    glBindTexture(GL_TEXTURE_2D, sub.textureId);
-                    glUniform1i(uHasTextureLoc, 1);
-                } else {
-                    glBindTexture(GL_TEXTURE_2D, 0);
-                    glUniform1i(uHasTextureLoc, 0);
-                }
-
-                ColorRGB effectiveAlbedo = sub.albedo * material.albedo;
-                glUniform3f(uAlbedoLoc, effectiveAlbedo.r, effectiveAlbedo.g, effectiveAlbedo.b);
-                glUniform1f(uMetallicLoc, sub.metallic);
-                glUniform1f(uRoughnessLoc, sub.roughness);
-
-                if (uEmissiveLoc != -1) {
-                    ColorRGB effectiveEmissive = sub.emissive;
-                    if (effectiveEmissive.r == 0 && effectiveEmissive.g == 0 && effectiveEmissive.b == 0) {
-                        effectiveEmissive = material.emissive;
-                    }
-                    glUniform3f(uEmissiveLoc, effectiveEmissive.r, effectiveEmissive.g, effectiveEmissive.b);
-                }
-
-                glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sub.indexCount), GL_UNSIGNED_INT,
-                               reinterpret_cast<const void*>(static_cast<uintptr_t>(sub.indexOffset * sizeof(uint32_t))));
-            }
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(buf.indexCount), GL_UNSIGNED_INT, 0);
+            glDisable(GL_CULL_FACE);
+            glBindVertexArray(0);
+            return;
         }
 
+        auto drawSubmesh = [&](SubMesh& sub) {
+            bool ds = sub.doubleSided || material.doubleSided;
+            if (ds) glDisable(GL_CULL_FACE);
+            else { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); }
+
+            GLuint albedoTex = EnsureSubTextureUploaded(sub.textureId, sub.texWidth, sub.texHeight, sub.texRGBA, true);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, albedoTex);
+            if (uAlbedoMapLoc != -1) glUniform1i(uAlbedoMapLoc, 0);
+            glUniform1i(uHasTextureLoc, albedoTex != 0 ? 1 : 0);
+
+            GLuint normTex = EnsureSubTextureUploaded(sub.normalTextureId, sub.normalTexW, sub.normalTexH, sub.normalTexRGBA, false);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, normTex);
+            if (uNormalMapLoc != -1) glUniform1i(uNormalMapLoc, 2);
+            if (uHasNormalMapLoc != -1) glUniform1i(uHasNormalMapLoc, normTex != 0 ? 1 : 0);
+
+            GLuint mrTex = EnsureSubTextureUploaded(sub.mrTextureId, sub.mrTexW, sub.mrTexH, sub.mrTexRGBA, false);
+            glActiveTexture(GL_TEXTURE3);
+            glBindTexture(GL_TEXTURE_2D, mrTex);
+            if (uMRMapLoc != -1) glUniform1i(uMRMapLoc, 3);
+            if (uHasMRMapLoc != -1) glUniform1i(uHasMRMapLoc, mrTex != 0 ? 1 : 0);
+
+            GLuint aoTex = EnsureSubTextureUploaded(sub.aoTextureId, sub.aoTexW, sub.aoTexH, sub.aoTexRGBA, false);
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(GL_TEXTURE_2D, aoTex);
+            if (uAOMapLoc != -1) glUniform1i(uAOMapLoc, 4);
+            if (uHasAOMapLoc != -1) glUniform1i(uHasAOMapLoc, aoTex != 0 ? 1 : 0);
+
+            GLuint emTex = EnsureSubTextureUploaded(sub.emissiveTextureId, sub.emissiveTexW, sub.emissiveTexH, sub.emissiveTexRGBA, true);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_2D, emTex);
+            if (uEmissiveMapLoc != -1) glUniform1i(uEmissiveMapLoc, 5);
+            if (uHasEmissiveMapLoc != -1) glUniform1i(uHasEmissiveMapLoc, emTex != 0 ? 1 : 0);
+
+            if (uAlphaModeLoc != -1) glUniform1i(uAlphaModeLoc, static_cast<int>(sub.alphaMode));
+            if (uAlphaCutoffLoc != -1) glUniform1f(uAlphaCutoffLoc, sub.alphaCutoff);
+
+            ColorRGB effectiveAlbedo = sub.albedo * material.albedo;
+            glUniform3f(uAlbedoLoc, effectiveAlbedo.r, effectiveAlbedo.g, effectiveAlbedo.b);
+            glUniform1f(uMetallicLoc, sub.metallic);
+            glUniform1f(uRoughnessLoc, sub.roughness);
+            if (uAmbientOcclusionLoc != -1) glUniform1f(uAmbientOcclusionLoc, sub.ambientOcclusion * material.ambientOcclusion);
+            if (uEmissiveLoc != -1) {
+                ColorRGB effectiveEmissive = sub.emissive;
+                if (effectiveEmissive.r == 0 && effectiveEmissive.g == 0 && effectiveEmissive.b == 0) {
+                    effectiveEmissive = material.emissive;
+                }
+                glUniform3f(uEmissiveLoc, effectiveEmissive.r, effectiveEmissive.g, effectiveEmissive.b);
+            }
+
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sub.indexCount), GL_UNSIGNED_INT,
+                           reinterpret_cast<const void*>(static_cast<uintptr_t>(sub.indexOffset * sizeof(uint32_t))));
+        };
+
+        // Pass 1: Opaque and Alpha-Mask submeshes
+        bool hasBlendSubmeshes = false;
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+        for (auto& sub : mesh->submeshes) {
+            if (sub.indexCount == 0) continue;
+            if (sub.alphaMode == PBRMaterial::AlphaMode::BLEND_MODE) {
+                hasBlendSubmeshes = true;
+                continue;
+            }
+            drawSubmesh(sub);
+        }
+
+        // Pass 2: Alpha-Blended submeshes (glass, translucent hair/fabric)
+        if (hasBlendSubmeshes) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            for (auto& sub : mesh->submeshes) {
+                if (sub.indexCount == 0 || sub.alphaMode != PBRMaterial::AlphaMode::BLEND_MODE) continue;
+                drawSubmesh(sub);
+            }
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
+
+        glActiveTexture(GL_TEXTURE0);
+        glDisable(GL_CULL_FACE);
         glBindVertexArray(0);
     }
 
+public:
+
     void BlitSoftwareFramebuffer(const uint32_t* fb, int w, int h) {
         if (!isGLInitialized || !fb) return;
+        hdrSceneOpen = false;
 
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, screenWidth, screenHeight);
+        glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, screenTex);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, fb);
 
@@ -750,7 +1015,11 @@ public:
 
     void BlitHUDOverlay(const uint32_t* hudFb, int w, int h, bool uploadNewPixels = true) {
         if (!isGLInitialized || !hudFb) return;
+        if (hdrSceneOpen) EndHDRScenePass();
 
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, screenWidth, screenHeight);
+        glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, hudTex);
         if (uploadNewPixels) {
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, hudFb);
@@ -770,7 +1039,6 @@ public:
 
     /**
      * Render Celestial Sky Dome (Deep atmosphere, horizon gradient, sun/moon disc & stars)
-     * Reconstructs world-space rays using the inverse View-Projection matrix.
      */
     void RenderSky(
         const Mat4& invViewProj,
@@ -783,7 +1051,6 @@ public:
     {
         if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || skyProg == 0) return;
 
-        // Hardware Early-Z optimization: only shade background pixels where depth == 1.0
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
         glDepthMask(GL_FALSE);
@@ -796,6 +1063,7 @@ public:
         glUniform3f(uSkySunDirLoc, sunDir.x, sunDir.y, sunDir.z);
         glUniform3f(uSkySunColLoc, sunCol.r, sunCol.g, sunCol.b);
         glUniform1f(uSkyIsNightLoc, isNight ? 1.0f : 0.0f);
+        if (uSkyOutputLinearHDRLoc != -1) glUniform1i(uSkyOutputLinearHDRLoc, hdrSceneOpen ? 1 : 0);
 
         glBindVertexArray(quadVAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -808,6 +1076,7 @@ public:
 
     void Present() {
         if (isGLInitialized && window) {
+            if (hdrSceneOpen) EndHDRScenePass();
             SDL_GL_SwapWindow(window);
         }
     }
@@ -816,22 +1085,42 @@ public:
         if (!isGLInitialized && !glContext) return;
 
         for (auto& pair : meshBuffers) {
-            glDeleteBuffers(1, &pair.second.vbo);
-            glDeleteBuffers(1, &pair.second.ebo);
-            glDeleteVertexArrays(1, &pair.second.vao);
+            if (pair.second.vbo) glDeleteBuffers(1, &pair.second.vbo);
+            if (pair.second.ebo) glDeleteBuffers(1, &pair.second.ebo);
+            if (pair.second.skinVbo) glDeleteBuffers(1, &pair.second.skinVbo);
+            if (pair.second.vao) glDeleteVertexArrays(1, &pair.second.vao);
         }
         meshBuffers.clear();
 
+        if (!ownedTextures.empty()) {
+            std::vector<GLuint> texList(ownedTextures.begin(), ownedTextures.end());
+            glDeleteTextures(static_cast<GLsizei>(texList.size()), texList.data());
+            ownedTextures.clear();
+        }
+
+        if (boneUBO) { glDeleteBuffers(1, &boneUBO); boneUBO = 0; }
         if (screenTex) { glDeleteTextures(1, &screenTex); screenTex = 0; }
         if (hudTex) { glDeleteTextures(1, &hudTex); hudTex = 0; }
         if (shadowDepthTex) { glDeleteTextures(1, &shadowDepthTex); shadowDepthTex = 0; }
         if (shadowFBO) { glDeleteFramebuffers(1, &shadowFBO); shadowFBO = 0; }
+        if (hdrColorTex) { glDeleteTextures(1, &hdrColorTex); hdrColorTex = 0; }
+        if (hdrDepthRBO) { glDeleteRenderbuffers(1, &hdrDepthRBO); hdrDepthRBO = 0; }
+        if (hdrFBO) { glDeleteFramebuffers(1, &hdrFBO); hdrFBO = 0; }
+        for (int i = 0; i < 2; ++i) {
+            if (bloomTex[i]) { glDeleteTextures(1, &bloomTex[i]); bloomTex[i] = 0; }
+            if (bloomFBO[i]) { glDeleteFramebuffers(1, &bloomFBO[i]); bloomFBO[i] = 0; }
+        }
+        hdrPipelineReady = false;
+        hdrSceneOpen = false;
         if (quadVAO) { glDeleteVertexArrays(1, &quadVAO); quadVAO = 0; }
         if (quadVBO) { glDeleteBuffers(1, &quadVBO); quadVBO = 0; }
         if (pbrProg) { glDeleteProgram(pbrProg); pbrProg = 0; }
         if (quadProg) { glDeleteProgram(quadProg); quadProg = 0; }
         if (skyProg) { glDeleteProgram(skyProg); skyProg = 0; }
         if (shadowProg) { glDeleteProgram(shadowProg); shadowProg = 0; }
+        if (bloomExtractProg) { glDeleteProgram(bloomExtractProg); bloomExtractProg = 0; }
+        if (bloomBlurProg) { glDeleteProgram(bloomBlurProg); bloomBlurProg = 0; }
+        if (hdrCompositeProg) { glDeleteProgram(hdrCompositeProg); hdrCompositeProg = 0; }
 
         if (glContext) {
             SDL_GL_DeleteContext(glContext);
