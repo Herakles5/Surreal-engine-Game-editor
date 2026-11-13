@@ -25,27 +25,61 @@ struct alignas(16) ColorRGB {
 
     inline uint32_t ToRGBA8() const {
         auto clamp01 = [](float v) -> uint32_t {
-            if (v <= 0.0f) return 0;
+            if (!(v > 0.0f)) return 0; // Guards <= 0 and NaN
             if (v >= 1.0f) return 255;
-            return static_cast<uint32_t>(v * 255.0f);
+            return static_cast<uint32_t>(v * 255.0f + 0.5f);
         };
         return (clamp01(a) << 24) | (clamp01(r) << 16) | (clamp01(g) << 8) | clamp01(b);
+    }
+
+    static inline float LinearToSRGBChannel(float x) {
+        if (!(x > 0.0f)) return 0.0f;
+        if (x >= 1.0f) return 1.0f;
+        return (x <= 0.0031308f) ? (x * 12.92f) : (1.055f * powf(x, 1.0f / 2.4f) - 0.055f);
+    }
+
+    static inline ColorRGB ACESFilm(const ColorRGB& hdr) {
+        auto curve = [](float x) -> float {
+            if (!(x > 0.0f)) return 0.0f;
+            float num = x * (2.51f * x + 0.03f);
+            float den = x * (2.43f * x + 0.59f) + 0.14f;
+            return std::clamp(num / std::max(den, 1e-6f), 0.0f, 1.0f);
+        };
+        return ColorRGB(curve(hdr.r), curve(hdr.g), curve(hdr.b), hdr.a);
+    }
+
+    inline ColorRGB LinearToSRGB() const {
+        return ColorRGB(LinearToSRGBChannel(r), LinearToSRGBChannel(g), LinearToSRGBChannel(b), a);
     }
 };
 
 struct PBRMaterial {
+    enum class AlphaMode {
+        OPAQUE_MODE = 0,
+        MASK_MODE = 1,
+        BLEND_MODE = 2
+    };
+
     ColorRGB albedo;       // Base Color (Linear RGB)
     float roughness;       // Surface micro-roughness [0.04 .. 1.0]
     float metallic;        // Conductor vs dielectric [0.0 .. 1.0]
     float ambientOcclusion;// Cavity AO factor [0.0 .. 1.0]
     ColorRGB emissive;     // Emissive glow radiation
+    AlphaMode alphaMode;
+    float alphaCutoff;
+    bool doubleSided;
+    bool allowWetPuddles;
 
     constexpr PBRMaterial()
         : albedo(ColorRGB(0.8f, 0.8f, 0.8f)),
           roughness(0.5f),
           metallic(0.0f),
           ambientOcclusion(1.0f),
-          emissive(ColorRGB(0, 0, 0)) {}
+          emissive(ColorRGB(0, 0, 0)),
+          alphaMode(AlphaMode::OPAQUE_MODE),
+          alphaCutoff(0.5f),
+          doubleSided(false),
+          allowWetPuddles(false) {}
 };
 
 struct DirectionalLight {
@@ -126,11 +160,15 @@ public:
         Vec3 N = normal.Normalized();
         Vec3 V = viewDir.Normalized();
         Vec3 L = lightDir.Normalized();
-        Vec3 H = (V + L).Normalized();
+        if (N.LengthSq() <= 1e-12f || L.LengthSq() <= 1e-12f) return ColorRGB(0, 0, 0);
+        if (V.LengthSq() <= 1e-12f) V = N;
+        Vec3 halfRaw = V + L;
+        Vec3 H = (halfRaw.LengthSq() > 1e-12f) ? halfRaw.Normalized() : N;
 
         float NdotL = std::max(N.Dot(L), 0.0f);
         if (NdotL <= 0.0f) return ColorRGB(0, 0, 0);
 
+        float safeRoughness = std::clamp(mat.roughness, 0.04f, 1.0f);
         float NdotV = std::max(N.Dot(V), 0.0f);
 
         // Dielectric base reflectivity: 0.04 (plastic/water) up to albedo for metals
@@ -143,8 +181,8 @@ public:
         );
 
         // Cook-Torrance Specular BRDF terms
-        float D = DistributionGGX(N, H, mat.roughness);
-        float G = GeometrySmith(N, V, L, mat.roughness);
+        float D = DistributionGGX(N, H, safeRoughness);
+        float G = GeometrySmith(N, V, L, safeRoughness);
         Vec3 F = FresnelSchlick(std::max(H.Dot(V), 0.0f), F0);
 
         Vec3 numerator = F * (D * G);

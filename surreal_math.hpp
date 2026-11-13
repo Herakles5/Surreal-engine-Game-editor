@@ -68,7 +68,9 @@ struct alignas(16) Vec3 {
     inline float LengthSq() const { return x * x + y * y + z * z; }
     inline float Length() const { return sqrtf(LengthSq()); }
     inline Vec3 Normalized() const {
-        float inv = FastInvSqrt(LengthSq());
+        float lenSq = LengthSq();
+        if (lenSq <= 1e-12f) return Vec3(0.0f, 0.0f, 0.0f);
+        float inv = 1.0f / sqrtf(lenSq);
         return Vec3(x * inv, y * inv, z * inv);
     }
 };
@@ -178,8 +180,16 @@ struct alignas(64) Mat4 {
     }
 
     static Mat4 LookAt(const Vec3& eye, const Vec3& target, const Vec3& up) {
-        Vec3 f = (target - eye).Normalized();
-        Vec3 s = f.Cross(up).Normalized();
+        Vec3 diff = target - eye;
+        Vec3 f = (diff.LengthSq() > 1e-12f) ? diff.Normalized() : Vec3(0.0f, 0.0f, -1.0f);
+        Vec3 safeUp = (up.LengthSq() > 1e-12f) ? up.Normalized() : Vec3(0.0f, 1.0f, 0.0f);
+        Vec3 rawSide = f.Cross(safeUp);
+        if (rawSide.LengthSq() <= 1e-10f) {
+            Vec3 fallbackUp = (fabsf(f.y) < 0.99f) ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(0.0f, 0.0f, 1.0f);
+            rawSide = f.Cross(fallbackUp);
+            if (rawSide.LengthSq() <= 1e-10f) rawSide = Vec3(1.0f, 0.0f, 0.0f);
+        }
+        Vec3 s = rawSide.Normalized();
         Vec3 u = s.Cross(f);
 
         Mat4 r = Identity();
@@ -275,6 +285,38 @@ struct alignas(64) Mat4 {
         o[15] = ( a[8] * s3 - a[9] * s1 + a[10] * s0) * invDet;
 
         return inv;
+    }
+
+    Mat4 Transposed() const {
+        Mat4 t = {};
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                t.m[r][c] = m[c][r];
+            }
+        }
+        return t;
+    }
+
+    // Upper-left 3x3 inverse-transpose for transforming surface normals cleanly under non-uniform scale
+    Mat4 InverseTranspose3x3() const {
+        float c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1];
+        float c01 = m[1][2] * m[2][0] - m[1][0] * m[2][2];
+        float c02 = m[1][0] * m[2][1] - m[1][1] * m[2][0];
+        float det = m[0][0] * c00 + m[0][1] * c01 + m[0][2] * c02;
+        if (fabsf(det) < 1e-10f) return Identity();
+        float invDet = 1.0f / det;
+
+        Mat4 res = Identity();
+        res.m[0][0] = c00 * invDet;
+        res.m[0][1] = c01 * invDet;
+        res.m[0][2] = c02 * invDet;
+        res.m[1][0] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * invDet;
+        res.m[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * invDet;
+        res.m[1][2] = (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * invDet;
+        res.m[2][0] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * invDet;
+        res.m[2][1] = (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * invDet;
+        res.m[2][2] = (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * invDet;
+        return res;
     }
 };
 
