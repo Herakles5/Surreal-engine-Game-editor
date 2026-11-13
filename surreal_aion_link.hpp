@@ -42,6 +42,7 @@ class AionLink {
 public:
     bool enabled = true;
     bool connected = false;
+    bool IsConnecting() const { return connecting; }
     int generation = 0;
     int rulesCount = 0;
     int focalAxiomsCount = 16;

@@ -17,11 +17,15 @@
 #include "surreal_pbr.hpp"
 #include "surreal_meshlet.hpp"
 #include "surreal_ecs.hpp"
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <iostream>
-#include <vector>
-#include <unordered_map>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace Surreal {
 
@@ -31,15 +35,27 @@ enum class RenderBackend {
 };
 
 struct GLMeshBuffer {
-    GLuint vao;
-    GLuint vbo;
-    GLuint ebo;
-    size_t vertexCount;
-    size_t indexCount;
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    GLuint ebo = 0;
+    GLuint skinVbo = 0;
+    size_t vertexCount = 0;
+    size_t indexCount = 0;
+    size_t skinVertexCount = 0;
+    bool hasBindPoseVBO = false;
+};
+
+struct GPUSkinVertex {
+    uint32_t joints[4];
+    float weights[4];
 };
 
 class SurrealHybridRenderer {
 public:
+    static constexpr int MAX_GPU_BONES = 250;
+    static constexpr int NUM_SHADOW_CASCADES = 3;
+    static constexpr uint32_t SHADOW_MAP_SIZE = 2048;
+
     RenderBackend backend;
     SDL_Window* window;
     SDL_GLContext glContext;
@@ -53,26 +69,54 @@ public:
     GLuint quadProg;
     GLuint skyProg;
     GLuint shadowProg;
+    GLuint bloomExtractProg = 0;
+    GLuint bloomBlurProg = 0;
+    GLuint hdrCompositeProg = 0;
     GLuint quadVAO, quadVBO;
     GLuint screenTex;
     GLuint hudTex;
 
-    // Directional Shadow Map FBO & Depth Texture (2048x2048)
+    // GPU Bone Palette UBO (binding point 0)
+    GLuint boneUBO = 0;
+
+    // 3-Cascade Directional Shadow Map FBO & Texture2DArray (2048x2048x3)
     GLuint shadowFBO;
     GLuint shadowDepthTex;
-    static constexpr uint32_t SHADOW_MAP_SIZE = 2048;
     Mat4 lightSpaceMatrix;
+    Mat4 cascadeMatrices[NUM_SHADOW_CASCADES];
+    float cascadeSplits[NUM_SHADOW_CASCADES] = {16.0f, 55.0f, 160.0f};
+    int activeShadowCascade = 0;
+    int renderedShadowCascades = 0;
     bool shadowMapReady = false;
+
+    // HDR 16-bit Floating-Point Scene FBO & Separable Bloom Ping-Pong Buffers
+    GLuint hdrFBO = 0;
+    GLuint hdrColorTex = 0;
+    GLuint hdrDepthRBO = 0;
+    GLuint bloomFBO[2] = {0, 0};
+    GLuint bloomTex[2] = {0, 0};
+    uint32_t bloomWidth = 0;
+    uint32_t bloomHeight = 0;
+    bool hdrEnabled = true;
+    bool hdrPipelineReady = false;
+    bool hdrSceneOpen = false;
+    float bloomThreshold = 1.05f;
+    float bloomIntensity = 0.32f;
+    float exposure = 1.0f;
 
     // Uniform Locations
     GLint uMVPLoc;
     GLint uModelLoc;
     GLint uNormalMatLoc;
     GLint uLightSpaceMatrixLoc;
+    GLint uCascadeSplitsLoc = -1;
+    GLint uNumShadowCascadesLoc = -1;
     GLint uShadowMapLoc;
     GLint uShadowMapEnabledLoc;
     GLint uBeatPulseLoc;
     GLint uShadowMVPLoc;
+    GLint uShadowUseSkinningLoc = -1;
+    GLint uShadowFootOffsetLoc = -1;
     GLint uSunDirLoc;
     GLint uSunColorLoc;
     GLint uAmbientColorLoc;
@@ -80,6 +124,7 @@ public:
     GLint uAlbedoLoc;
     GLint uMetallicLoc;
     GLint uRoughnessLoc;
+    GLint uAmbientOcclusionLoc = -1;
     GLint uEmissiveLoc;
     GLint uTimeLoc;
     GLint uNumPointLightsLoc;
@@ -87,7 +132,21 @@ public:
     GLint uPointLightColLoc;
     GLint uPointLightRadiusLoc;
     GLint uAlbedoMapLoc;
+    GLint uNormalMapLoc = -1;
+    GLint uMRMapLoc = -1;
+    GLint uAOMapLoc = -1;
+    GLint uEmissiveMapLoc = -1;
     GLint uHasTextureLoc;
+    GLint uHasNormalMapLoc = -1;
+    GLint uHasMRMapLoc = -1;
+    GLint uHasAOMapLoc = -1;
+    GLint uHasEmissiveMapLoc = -1;
+    GLint uAlphaModeLoc = -1;
+    GLint uAlphaCutoffLoc = -1;
+    GLint uAllowWetPuddlesLoc = -1;
+    GLint uUseSkinningLoc = -1;
+    GLint uFootOffsetLoc = -1;
+    GLint uOutputLinearHDRLoc = -1;
     GLint uFogColorLoc;
     GLint uWetnessLoc;
     GLint uGlowIntensityLoc;
@@ -107,12 +166,22 @@ public:
     GLint uSkySunDirLoc;
     GLint uSkySunColLoc;
     GLint uSkyIsNightLoc;
+    GLint uSkyOutputLinearHDRLoc = -1;
+
+    // Bloom & HDR Composite Uniform Locations
+    GLint uBloomThresholdLoc = -1;
+    GLint uBloomBlurHorizLoc = -1;
+    GLint uCompositeHdrLoc = -1;
+    GLint uCompositeBloomLoc = -1;
+    GLint uCompositeBloomIntLoc = -1;
+    GLint uCompositeExposureLoc = -1;
 
     std::string glVendor;
     std::string glRenderer;
     std::string glVersion;
 
     std::unordered_map<const SurrealMesh*, GLMeshBuffer> meshBuffers;
+    std::unordered_set<GLuint> ownedTextures;
 
     SurrealHybridRenderer()
         : backend(RenderBackend::GPU_OPENGL),
@@ -180,33 +249,84 @@ public:
 
         SetupFullscreenQuad();
         SetupTextures();
+        SetupBoneUBO();
         SetupShadowMap();
+        SetupHDRPipeline();
 
         isGLInitialized = true;
         return true;
     }
 
     /**
-     * Begin Directional Shadow Depth Pass (2048x2048 Depth FBO centered around focusPos)
+     * Compute 3 texel-snapped directional shadow cascades centered around focusPos.
      */
-    void BeginShadowPass(const Vec3& sunDir, const Vec3& focusPos) {
-        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || shadowFBO == 0 || shadowProg == 0) return;
-
+    void ComputeCascadeMatrices(const Vec3& sunDir, const Vec3& focusPos, const Vec3& viewForward = Vec3(0, 0, -1)) {
         Vec3 lightDir = sunDir.Normalized();
-        if (lightDir.y < 0.12f) lightDir.y = 0.12f;
+        if (lightDir.LengthSq() <= 1e-12f) lightDir = Vec3(0.577f, 0.577f, 0.577f);
+        if (lightDir.y < 0.14f) lightDir.y = 0.14f;
         lightDir = lightDir.Normalized();
 
-        Vec3 lightEye = focusPos + lightDir * 24.0f;
-        Mat4 lightView = Mat4::LookAt(lightEye, focusPos, Vec3(0.0f, 1.0f, 0.0f));
-        Mat4 lightProj = Mat4::Orthographic(-18.0f, 18.0f, -18.0f, 18.0f, 1.0f, 52.0f);
-        lightSpaceMatrix = lightProj * lightView;
+        Vec3 fwdXZ(viewForward.x, 0.0f, viewForward.z);
+        if (fwdXZ.LengthSq() > 1e-6f) fwdXZ = fwdXZ.Normalized();
+        else fwdXZ = Vec3(0.0f, 0.0f, -1.0f);
+
+        const float radii[NUM_SHADOW_CASCADES] = {15.0f, 48.0f, 135.0f};
+        const float fwdOffsets[NUM_SHADOW_CASCADES] = {4.0f, 14.0f, 36.0f};
+        const float lightDist[NUM_SHADOW_CASCADES] = {38.0f, 75.0f, 140.0f};
+        const float zFar[NUM_SHADOW_CASCADES] = {96.0f, 180.0f, 320.0f};
+
+        for (int c = 0; c < NUM_SHADOW_CASCADES; ++c) {
+            float r = radii[c];
+            Vec3 center = focusPos + fwdXZ * fwdOffsets[c];
+
+            Mat4 lightView = Mat4::LookAt(center + lightDir * lightDist[c], center, Vec3(0.0f, 1.0f, 0.0f));
+            // Texel-snap light space center to stabilize shadow edges while moving
+            Vec3 centerLS = lightView.TransformPoint(center);
+            float worldUnitsPerTexel = (2.0f * r) / static_cast<float>(SHADOW_MAP_SIZE);
+            centerLS.x = floorf(centerLS.x / worldUnitsPerTexel) * worldUnitsPerTexel;
+            centerLS.y = floorf(centerLS.y / worldUnitsPerTexel) * worldUnitsPerTexel;
+
+            Mat4 lightProj = Mat4::Orthographic(
+                centerLS.x - r, centerLS.x + r,
+                centerLS.y - r, centerLS.y + r,
+                1.0f, zFar[c]
+            );
+            cascadeMatrices[c] = lightProj * lightView;
+        }
+        lightSpaceMatrix = cascadeMatrices[0];
+    }
+
+    bool BeginShadowCascade(int cascadeIdx) {
+        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || shadowFBO == 0 || shadowProg == 0 || shadowDepthTex == 0) {
+            return false;
+        }
+        if (cascadeIdx < 0 || cascadeIdx >= NUM_SHADOW_CASCADES) return false;
+        activeShadowCascade = cascadeIdx;
+        renderedShadowCascades = std::max(renderedShadowCascades, cascadeIdx + 1);
+        lightSpaceMatrix = cascadeMatrices[cascadeIdx];
 
         glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
         glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
+        glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowDepthTex, 0, cascadeIdx);
         glClear(GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LESS);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(1.8f, 3.0f);
         glUseProgram(shadowProg);
+        if (uShadowUseSkinningLoc != -1) glUniform1i(uShadowUseSkinningLoc, 0);
+        if (uShadowFootOffsetLoc != -1) glUniform1f(uShadowFootOffsetLoc, 0.0f);
+        return true;
+    }
+
+    /**
+     * Begin Directional Shadow Depth Pass (2048x2048x3 CSM centered around focusPos)
+     */
+    void BeginShadowPass(const Vec3& sunDir, const Vec3& focusPos, const Vec3& viewForward = Vec3(0, 0, -1)) {
+        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || shadowFBO == 0 || shadowProg == 0) return;
+        renderedShadowCascades = 0;
+        ComputeCascadeMatrices(sunDir, focusPos, viewForward);
+        BeginShadowCascade(0);
     }
 
     void RenderMeshShadow(
@@ -221,22 +341,45 @@ public:
         auto it = meshBuffers.find(mesh.get());
         if (it == meshBuffers.end()) return;
 
-        Mat4 mvp = lightSpaceMatrix * worldMat;
+        glUseProgram(shadowProg);
+        if (uShadowUseSkinningLoc != -1) glUniform1i(uShadowUseSkinningLoc, 0);
+        Mat4 mvp = cascadeMatrices[activeShadowCascade] * worldMat;
         glUniformMatrix4fv(uShadowMVPLoc, 1, GL_TRUE, &mvp.m[0][0]);
         glBindVertexArray(it->second.vao);
         glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(it->second.indexCount), GL_UNSIGNED_INT, 0);
         glBindVertexArray(0);
     }
 
+    template <typename SkelT>
+    void RenderSkinnedMeshShadow(const SkelT& skel, const Mat4& worldMat) {
+        if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || !skel.activeDeformedMesh || shadowFBO == 0 || shadowProg == 0) return;
+        if (!EnsureSkinnedMeshUploaded(skel.activeDeformedMesh, skel.bindVertices)) return;
+        auto it = meshBuffers.find(skel.activeDeformedMesh.get());
+        if (it == meshBuffers.end()) return;
+
+        UploadBonePalette(skel.skinMatrices);
+        glUseProgram(shadowProg);
+        if (uShadowUseSkinningLoc != -1) glUniform1i(uShadowUseSkinningLoc, 1);
+        if (uShadowFootOffsetLoc != -1) glUniform1f(uShadowFootOffsetLoc, skel.footBaseOffset);
+        Mat4 mvp = cascadeMatrices[activeShadowCascade] * worldMat;
+        glUniformMatrix4fv(uShadowMVPLoc, 1, GL_TRUE, &mvp.m[0][0]);
+        glBindVertexArray(it->second.vao);
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(it->second.indexCount), GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+        if (uShadowUseSkinningLoc != -1) glUniform1i(uShadowUseSkinningLoc, 0);
+    }
+
     void EndShadowPass() {
         if (backend != RenderBackend::GPU_OPENGL || !isGLInitialized || shadowFBO == 0) return;
+        glDisable(GL_POLYGON_OFFSET_FILL);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, screenWidth, screenHeight);
+        lightSpaceMatrix = cascadeMatrices[0];
         shadowMapReady = true;
     }
 
     /**
-     * Resize GL viewport + screen/HUD textures (window resize / fullscreen toggle).
+     * Resize GL viewport + HDR/Bloom/screen/HUD textures (window resize / fullscreen toggle).
      */
     void Resize(uint32_t w, uint32_t h) {
         if (w == 0 || h == 0) return;
@@ -248,6 +391,7 @@ public:
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, screenWidth, screenHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
         glBindTexture(GL_TEXTURE_2D, hudTex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, screenWidth, screenHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+        ResizeHDRTargets();
         glViewport(0, 0, screenWidth, screenHeight);
     }
 
@@ -273,15 +417,84 @@ public:
 
     void BeginFrame(const ColorRGB& clearColor = ColorRGB(0.02f, 0.03f, 0.07f)) {
         if (backend == RenderBackend::GPU_OPENGL && isGLInitialized) {
+            if (hdrEnabled && hdrPipelineReady && hdrFBO != 0) {
+                glBindFramebuffer(GL_FRAMEBUFFER, hdrFBO);
+                hdrSceneOpen = true;
+            } else {
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                hdrSceneOpen = false;
+            }
             glViewport(0, 0, screenWidth, screenHeight);
             glClearColor(clearColor.r, clearColor.g, clearColor.b, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glEnable(GL_DEPTH_TEST);
             glDepthFunc(GL_LESS);
-            glDisable(GL_CULL_FACE); // Double sided rendering
+            glDepthMask(GL_TRUE);
+            glDisable(GL_CULL_FACE);
 
             glUseProgram(pbrProg);
+            if (uOutputLinearHDRLoc != -1) glUniform1i(uOutputLinearHDRLoc, hdrSceneOpen ? 1 : 0);
+            if (uUseSkinningLoc != -1) glUniform1i(uUseSkinningLoc, 0);
+            if (uAllowWetPuddlesLoc != -1) glUniform1i(uAllowWetPuddlesLoc, 0);
         }
+    }
+
+    void EndHDRScenePass() {
+        if (!isGLInitialized || !hdrSceneOpen) return;
+        hdrSceneOpen = false;
+
+        if (!hdrPipelineReady || hdrFBO == 0 || bloomExtractProg == 0 || bloomBlurProg == 0 || hdrCompositeProg == 0 ||
+            bloomFBO[0] == 0 || bloomFBO[1] == 0) {
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, screenWidth, screenHeight);
+            return;
+        }
+
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+
+        // 1. Bright-pass bloom extraction (half-res)
+        glViewport(0, 0, bloomWidth, bloomHeight);
+        glBindFramebuffer(GL_FRAMEBUFFER, bloomFBO[0]);
+        glUseProgram(bloomExtractProg);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, hdrColorTex);
+        if (uBloomThresholdLoc != -1) glUniform1f(uBloomThresholdLoc, bloomThreshold);
+        glBindVertexArray(quadVAO);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        // 2. Separable Gaussian ping-pong blur
+        bool horizontal = true;
+        int passes = (shaderQuality >= 2) ? 6 : 4;
+        glUseProgram(bloomBlurProg);
+        for (int i = 0; i < passes; ++i) {
+            int dstIdx = horizontal ? 1 : 0;
+            int srcIdx = 1 - dstIdx;
+            glBindFramebuffer(GL_FRAMEBUFFER, bloomFBO[dstIdx]);
+            if (uBloomBlurHorizLoc != -1) glUniform1i(uBloomBlurHorizLoc, horizontal ? 1 : 0);
+            glBindTexture(GL_TEXTURE_2D, bloomTex[srcIdx]);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            horizontal = !horizontal;
+        }
+
+        // 3. Final HDR + Bloom -> ACES Filmic + sRGB Composite into Default Framebuffer 0
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, screenWidth, screenHeight);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(hdrCompositeProg);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, hdrColorTex);
+        if (uCompositeHdrLoc != -1) glUniform1i(uCompositeHdrLoc, 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, bloomTex[0]);
+        if (uCompositeBloomLoc != -1) glUniform1i(uCompositeBloomLoc, 1);
+        if (uCompositeBloomIntLoc != -1) glUniform1f(uCompositeBloomIntLoc, (shaderQuality == 0) ? 0.0f : bloomIntensity);
+        if (uCompositeExposureLoc != -1) glUniform1f(uCompositeExposureLoc, exposure);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindVertexArray(0);
+        glActiveTexture(GL_TEXTURE0);
     }
 
     void SetGlobalUniforms(
@@ -300,6 +513,9 @@ public:
         glUniform3f(uSunColorLoc, sunColor.r, sunColor.g, sunColor.b);
         glUniform3f(uAmbientColorLoc, ambientColor.r, ambientColor.g, ambientColor.b);
         glUniform3f(uCamPosLoc, camPos.x, camPos.y, camPos.z);
+        if (uOutputLinearHDRLoc != -1) {
+            glUniform1i(uOutputLinearHDRLoc, hdrSceneOpen ? 1 : 0);
+        }
         if (uFogColorLoc != -1) {
             glUniform3f(uFogColorLoc, fogColor.r, fogColor.g, fogColor.b);
         }
@@ -307,7 +523,6 @@ public:
             glUniform1f(uTimeLoc, timeSec);
         }
         if (uBeatPulseLoc != -1) {
-            // Dynamic BPM rhythmic pulse envelope synchronized with Dojo dancers & Aion Choreo-Memory-Link
             float bpmClamped = std::max(60.0f, std::min(220.0f, activeBPM));
             float beatFreqRad = (bpmClamped / 60.0f) * 6.2831853f;
             float rawWave = 0.5f + 0.5f * std::sin(timeSec * beatFreqRad);
@@ -315,11 +530,17 @@ public:
             glUniform1f(uBeatPulseLoc, beatPulse);
         }
         if (uLightSpaceMatrixLoc != -1) {
-            glUniformMatrix4fv(uLightSpaceMatrixLoc, 1, GL_TRUE, &lightSpaceMatrix.m[0][0]);
+            glUniformMatrix4fv(uLightSpaceMatrixLoc, NUM_SHADOW_CASCADES, GL_TRUE, &cascadeMatrices[0].m[0][0]);
+        }
+        if (uCascadeSplitsLoc != -1) {
+            glUniform3f(uCascadeSplitsLoc, cascadeSplits[0], cascadeSplits[1], cascadeSplits[2]);
+        }
+        if (uNumShadowCascadesLoc != -1) {
+            glUniform1i(uNumShadowCascadesLoc, std::max(1, renderedShadowCascades));
         }
         if (uShadowMapEnabledLoc != -1 && shadowDepthTex != 0 && shadowMapReady) {
             glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, shadowDepthTex);
+            glBindTexture(GL_TEXTURE_2D_ARRAY, shadowDepthTex);
             glUniform1i(uShadowMapLoc, 1);
             glUniform1i(uShadowMapEnabledLoc, 1);
             glActiveTexture(GL_TEXTURE0);
