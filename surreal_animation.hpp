@@ -552,11 +552,6 @@ private:
         }
 
         dirtyGPUUpload = true;
-
-        // Calculate bounds only once at initialization (avoids 500k-vertex single-threaded scan per frame)
-        if (needsBoundsInit) {
-            activeDeformedMesh->CalculateBounds();
-        }
     }
 };
 

@@ -94,8 +94,12 @@ static void TestMathAndPBR() {
           "InverseTranspose3x3 preserves tangent-normal orthogonality under non-uniform scale");
 
     // PBR zero-vector & NaN guards
+    PBRMaterial degenerMat;
+    degenerMat.albedo = ColorRGB(1, 1, 1);
+    degenerMat.metallic = 0.5f;
+    degenerMat.roughness = 0.0f;
     ColorRGB cNan = PBRShadingCore::EvaluateDirectLight(
-        Vec3(0, 0, 0), Vec3(0, 0, 0), Vec3(0, 0, 0), ColorRGB(1, 1, 1), ColorRGB(1, 1, 1), 0.5f, 0.0f);
+        Vec3(0, 0, 0), Vec3(0, 0, 0), Vec3(0, 0, 0), Vec3(0, 0, 0), ColorRGB(1, 1, 1), degenerMat);
     CHECK(std::isfinite(cNan.r) && std::isfinite(cNan.g) && std::isfinite(cNan.b),
           "EvaluateDirectLight handles degenerate vectors & roughness=0 cleanly");
 
@@ -174,11 +178,11 @@ static void TestCPURasterizerAndMeshlets() {
     SubMesh smA;
     smA.indexOffset = 0;
     smA.indexCount = static_cast<uint32_t>(gridMesh->indices.size() / 2);
-    smA.baseColorFactor = ColorRGB(1, 0, 0);
+    smA.albedo = ColorRGB(1, 0, 0);
     SubMesh smB;
     smB.indexOffset = smA.indexCount;
     smB.indexCount = static_cast<uint32_t>(gridMesh->indices.size()) - smA.indexCount;
-    smB.baseColorFactor = ColorRGB(0, 1, 0);
+    smB.albedo = ColorRGB(0, 1, 0);
     gridMesh->submeshes = {smA, smB};
     gridMesh->BuildClusters();
 
@@ -237,14 +241,14 @@ static void TestECSPhysics() {
     EntityID a = world.CreateEntity("SphereA");
     world.transforms[a].position = Vec3(0.0f, 1.0f, 0.0f);
     world.rigidbodies[a].mass = 1.0f;
-    world.rigidbodies[a].useGravity = false;
+    world.rigidbodies[a].acceleration = Vec3(0, 0, 0);
     world.colliders[a].type = ColliderComponent::SPHERE;
     world.colliders[a].radius = 0.6f;
 
     EntityID b = world.CreateEntity("SphereB");
     world.transforms[b].position = Vec3(0.5f, 1.0f, 0.0f); // overlapping by 0.7m
     world.rigidbodies[b].mass = 1.0f;
-    world.rigidbodies[b].useGravity = false;
+    world.rigidbodies[b].acceleration = Vec3(0, 0, 0);
     world.colliders[b].type = ColliderComponent::SPHERE;
     world.colliders[b].radius = 0.6f;
 
@@ -256,7 +260,6 @@ static void TestECSPhysics() {
     EntityID c = world.CreateEntity("ClampBody");
     world.transforms[c].position = Vec3(0.0f, 0.5f, 0.0f);
     world.rigidbodies[c].velocity = Vec3(10.0f, 0.0f, 0.0f);
-    world.rigidbodies[c].useGravity = true;
     world.colliders[c].type = ColliderComponent::SPHERE;
     world.colliders[c].radius = 0.5f;
     world.UpdatePhysics(10.0f);
@@ -334,40 +337,44 @@ static void TestGLTFHierarchyAndSkeletalCrossFade() {
 
     // Programmatic CrossFadeToClip test
     SkeletalMeshInstance skel;
-    SkeletalJoint j0;
+    SkeletonJoint j0;
     j0.name = "Root";
     j0.parentIndex = -1;
-    j0.restTranslation = Vec3(0, 0, 0);
-    j0.restRotation = Quat(0, 0, 0, 1);
-    j0.restScale = Vec3(1, 1, 1);
+    j0.baseTranslation = Vec3(0, 0, 0);
+    j0.baseRotation = Quat(0, 0, 0, 1);
+    j0.baseScale = Vec3(1, 1, 1);
     j0.inverseBindMatrix = Mat4::Identity();
     skel.joints.push_back(j0);
-    skel.bindVertices.push_back(Vertex3D(Vec3(0, 1, 0), Vec3(0, 0, 1), 0, 0, Vec4(1, 1, 1, 1)));
-    SkinVertexData svd{};
-    svd.joints[0] = 0;
-    svd.weights[0] = 1.0f;
-    skel.bindSkinData.push_back(svd);
-    skel.activeDeformedMesh->vertices = skel.bindVertices;
+    skel.skinJointNodeIndices = {0};
+    skel.skinJointIBMs = {Mat4::Identity()};
+
+    SkinnedVertex3D sv;
+    sv.position = Vec3(0, 1, 0);
+    sv.normal = Vec3(0, 0, 1);
+    sv.joints[0] = 0;
+    sv.weights[0] = 1.0f;
+    skel.bindVertices.push_back(sv);
+    skel.activeDeformedMesh->vertices.push_back(Vertex3D(sv.position, sv.normal, 0, 0, Vec4(1, 1, 1, 1)));
     skel.activeDeformedMesh->indices = {0, 0, 0};
 
     AnimationClip clipA;
     clipA.name = "IdentityPose";
     clipA.duration = 1.0f;
     AnimationChannel chA;
-    chA.targetJointIndex = 0;
-    chA.type = AnimationChannel::ROTATION;
-    chA.times = {0.0f, 1.0f};
-    chA.rotValues = {Quat::FromAxisAngle(Vec3(0, 1, 0), 0.0f), Quat::FromAxisAngle(Vec3(0, 1, 0), 0.0f)};
+    chA.jointIndex = 0;
+    chA.target = ChannelTarget::ROTATION;
+    chA.keyTimes = {0.0f, 1.0f};
+    chA.quatValues = {Quat::FromAxisAngle(Vec3(0, 1, 0), 0.0f), Quat::FromAxisAngle(Vec3(0, 1, 0), 0.0f)};
     clipA.channels.push_back(chA);
 
     AnimationClip clipB;
     clipB.name = "Turn90";
     clipB.duration = 1.0f;
     AnimationChannel chB;
-    chB.targetJointIndex = 0;
-    chB.type = AnimationChannel::ROTATION;
-    chB.times = {0.0f, 1.0f};
-    chB.rotValues = {Quat::FromAxisAngle(Vec3(0, 1, 0), 1.5707963f), Quat::FromAxisAngle(Vec3(0, 1, 0), 1.5707963f)};
+    chB.jointIndex = 0;
+    chB.target = ChannelTarget::ROTATION;
+    chB.keyTimes = {0.0f, 1.0f};
+    chB.quatValues = {Quat::FromAxisAngle(Vec3(0, 1, 0), 1.5707963f), Quat::FromAxisAngle(Vec3(0, 1, 0), 1.5707963f)};
     clipB.channels.push_back(chB);
 
     skel.clips = {clipA, clipB};
