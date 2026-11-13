@@ -630,6 +630,7 @@ public:
         }
         glBindBuffer(GL_UNIFORM_BUFFER, boneUBO);
         glBufferSubData(GL_UNIFORM_BUFFER, 0, static_cast<GLsizeiptr>(count * 16 * sizeof(float)), packed.data());
+        glBindBufferBase(GL_UNIFORM_BUFFER, 0, boneUBO);
         glBindBuffer(GL_UNIFORM_BUFFER, 0);
     }
 
@@ -1131,14 +1132,55 @@ public:
     }
 
 private:
+    bool LinkProgram(GLuint prog, const char* label) {
+        glLinkProgram(prog);
+        GLint ok = 0;
+        glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            char log[1024] = {};
+            glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+            std::cerr << "[-] Shader link error (" << label << "): " << log << "\n";
+            return false;
+        }
+        return true;
+    }
+
+    void BindBoneBlock(GLuint prog) {
+        if (prog == 0) return;
+        GLuint idx = glGetUniformBlockIndex(prog, "BoneBlock");
+        if (idx != GL_INVALID_INDEX) {
+            glUniformBlockBinding(prog, idx, 0);
+        }
+    }
+
     bool BuildShaders() {
-        // 0. Directional Shadow Depth Pass Shader (2048x2048)
+        // 0. Directional Shadow Depth Pass Shader (2048x2048x3 CSM + GPU Skinning)
         const char* shadowVS = R"(
 #version 330 core
 layout (location = 0) in vec3 aPos;
+layout (location = 4) in uvec4 aJoints;
+layout (location = 5) in vec4 aWeights;
+
+layout(std140) uniform BoneBlock {
+    mat4 uBones[250];
+};
+
 uniform mat4 uShadowMVP;
+uniform int uShadowUseSkinning;
+uniform float uShadowFootOffset;
+
 void main() {
-    gl_Position = uShadowMVP * vec4(aPos, 1.0);
+    vec4 localPos = vec4(aPos, 1.0);
+    if (uShadowUseSkinning == 1) {
+        mat4 skinMat =
+            aWeights.x * uBones[min(aJoints.x, 249u)] +
+            aWeights.y * uBones[min(aJoints.y, 249u)] +
+            aWeights.z * uBones[min(aJoints.z, 249u)] +
+            aWeights.w * uBones[min(aJoints.w, 249u)];
+        localPos = skinMat * localPos;
+        localPos.y -= uShadowFootOffset;
+    }
+    gl_Position = uShadowMVP * localPos;
 }
 )";
         const char* shadowFS = R"(
@@ -1153,43 +1195,74 @@ void main() {
             shadowProg = glCreateProgram();
             glAttachShader(shadowProg, shvs);
             glAttachShader(shadowProg, shfs);
-            glLinkProgram(shadowProg);
+            bool linked = LinkProgram(shadowProg, "shadowProg");
             glDeleteShader(shvs);
             glDeleteShader(shfs);
+            if (!linked) { glDeleteProgram(shadowProg); shadowProg = 0; return false; }
+            BindBoneBlock(shadowProg);
             uShadowMVPLoc = glGetUniformLocation(shadowProg, "uShadowMVP");
+            uShadowUseSkinningLoc = glGetUniformLocation(shadowProg, "uShadowUseSkinning");
+            uShadowFootOffsetLoc = glGetUniformLocation(shadowProg, "uShadowFootOffset");
         }
 
-        // 1. Cook-Torrance PBR Vertex Shader (with non-uniform scale Normal Matrix & Light-Space projection)
+        // 1. Cook-Torrance PBR Vertex Shader (GPU LBS Skinning + 3-Cascade Light Space Projection)
         const char* pbrVS = R"(
 #version 330 core
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
 layout (location = 2) in vec2 aTexCoord;
 layout (location = 3) in vec4 aColor;
+layout (location = 4) in uvec4 aJoints;
+layout (location = 5) in vec4 aWeights;
+
+layout(std140) uniform BoneBlock {
+    mat4 uBones[250];
+};
 
 uniform mat4 uMVP;
 uniform mat4 uModel;
 uniform mat3 uNormalMatrix;
-uniform mat4 uLightSpaceMatrix;
+uniform mat4 uLightSpaceMatrix[3];
+uniform int uUseSkinning;
+uniform float uFootOffset;
+uniform vec3 uCamPos;
 
 out vec3 vFragPos;
 out vec3 vNormal;
 out vec2 vTexCoord;
 out vec4 vColor;
-out vec4 vFragPosLightSpace;
+out vec4 vFragPosLightSpace0;
+out vec4 vFragPosLightSpace1;
+out vec4 vFragPosLightSpace2;
+out float vViewDist;
 
 void main() {
-    vec4 worldPos = uModel * vec4(aPos, 1.0);
+    vec4 localPos = vec4(aPos, 1.0);
+    vec3 localNorm = aNormal;
+    if (uUseSkinning == 1) {
+        mat4 skinMat =
+            aWeights.x * uBones[min(aJoints.x, 249u)] +
+            aWeights.y * uBones[min(aJoints.y, 249u)] +
+            aWeights.z * uBones[min(aJoints.z, 249u)] +
+            aWeights.w * uBones[min(aJoints.w, 249u)];
+        localPos = skinMat * localPos;
+        localPos.y -= uFootOffset;
+        localNorm = mat3(skinMat) * localNorm;
+    }
+    vec4 worldPos = uModel * localPos;
     vFragPos = vec3(worldPos);
-    vNormal = normalize(uNormalMatrix * aNormal);
+    vNormal = normalize(uNormalMatrix * localNorm);
     vTexCoord = aTexCoord;
     vColor = aColor;
-    vFragPosLightSpace = uLightSpaceMatrix * worldPos;
-    gl_Position = uMVP * vec4(aPos, 1.0);
+    vFragPosLightSpace0 = uLightSpaceMatrix[0] * worldPos;
+    vFragPosLightSpace1 = uLightSpaceMatrix[1] * worldPos;
+    vFragPosLightSpace2 = uLightSpaceMatrix[2] * worldPos;
+    vViewDist = length(uCamPos - vFragPos);
+    gl_Position = uMVP * localPos;
 }
 )";
 
-        // 2. Cook-Torrance PBR Fragment Shader (with 3x3 PCF Directional Shadow Map & Beat-Reactive Neon Pulse)
+        // 2. Cook-Torrance PBR Fragment Shader (PBR Maps + 3-Cascade PCF + Opt-In Wet Puddles + Linear HDR)
         const char* pbrFS = R"(
 #version 330 core
 out vec4 FragColor;
@@ -1198,7 +1271,10 @@ in vec3 vFragPos;
 in vec3 vNormal;
 in vec2 vTexCoord;
 in vec4 vColor;
-in vec4 vFragPosLightSpace;
+in vec4 vFragPosLightSpace0;
+in vec4 vFragPosLightSpace1;
+in vec4 vFragPosLightSpace2;
+in float vViewDist;
 
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
@@ -1207,11 +1283,29 @@ uniform vec3 uCamPos;
 uniform vec3 uAlbedo;
 uniform float uMetallic;
 uniform float uRoughness;
+uniform float uAmbientOcclusion;
 uniform vec3 uEmissive;
+
 uniform sampler2D uAlbedoMap;
 uniform int uHasTexture;
-uniform sampler2D uShadowMap;
+uniform sampler2D uNormalMap;
+uniform int uHasNormalMap;
+uniform sampler2D uMRMap;
+uniform int uHasMRMap;
+uniform sampler2D uAOMap;
+uniform int uHasAOMap;
+uniform sampler2D uEmissiveMap;
+uniform int uHasEmissiveMap;
+
+uniform int uAlphaMode;
+uniform float uAlphaCutoff;
+uniform int uAllowWetPuddles;
+uniform int uOutputLinearHDR;
+
+uniform sampler2DArray uShadowMap;
 uniform int uShadowMapEnabled;
+uniform vec3 uCascadeSplits;
+uniform int uNumShadowCascades;
 uniform float uBeatPulse;
 uniform vec3 uFogColor;
 uniform float uTime;
@@ -1219,7 +1313,6 @@ uniform float uWetness;
 uniform float uGlowIntensity;
 uniform int uShaderQuality;
 
-// Multi-Point Lights (Street lamps, storefront neon, player aura)
 const int MAX_POINT_LIGHTS = 8;
 uniform int uNumPointLights;
 uniform vec3 uPointLightPos[8];
@@ -1250,13 +1343,26 @@ float GeometrySchlickGGX(float NdotV, float roughness) {
 float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
     float NdotV = max(dot(N, V), 0.0);
     float NdotL = max(dot(N, L), 0.0);
-    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
-    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
-    return ggx1 * ggx2;
+    return GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
 }
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec3 PerturbNormal(vec3 N, vec3 worldPos, vec2 uv) {
+    vec3 mapN = texture(uNormalMap, uv).xyz * 2.0 - 1.0;
+    vec3 dp1 = dFdx(worldPos);
+    vec3 dp2 = dFdy(worldPos);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+    if (dot(T, T) < 1e-8 && dot(B, B) < 1e-8) return N;
+    return normalize(mat3(T * invmax, B * invmax, N) * mapN);
 }
 
 void main() {
@@ -1265,7 +1371,8 @@ void main() {
     vec4 texSample = vec4(1.0);
     if (uHasTexture == 1) {
         texSample = texture(uAlbedoMap, vTexCoord);
-        if (texSample.a < 0.15) discard; // Alpha cutout for foliage, leaves & grates
+        float cutoff = (uAlphaMode == 1) ? uAlphaCutoff : 0.15;
+        if (uAlphaMode != 2 && texSample.a < cutoff) discard;
         baseAlbedo *= texSample.rgb;
         alpha *= texSample.a;
     } else {
@@ -1273,19 +1380,30 @@ void main() {
     }
     vec3 albedo = baseAlbedo;
 
+    float baseRoughness = clamp(uRoughness, 0.04, 1.0);
+    float baseMetallic = clamp(uMetallic, 0.0, 1.0);
+    if (uHasMRMap == 1) {
+        vec4 mr = texture(uMRMap, vTexCoord);
+        baseRoughness = clamp(baseRoughness * mr.g, 0.04, 1.0);
+        baseMetallic = clamp(baseMetallic * mr.b, 0.0, 1.0);
+    }
+
+    float baseAO = clamp(uAmbientOcclusion, 0.0, 1.0);
+    if (uHasAOMap == 1) {
+        baseAO *= texture(uAOMap, vTexCoord).r;
+    }
+
     vec3 N = normalize(vNormal);
+    if (uHasNormalMap == 1) {
+        N = PerturbNormal(N, vFragPos, vTexCoord);
+    }
     vec3 V = normalize(uCamPos - vFragPos);
     vec3 L = normalize(uSunDir);
     float NdotV = max(dot(N, V), 0.0);
 
-    // =========================================================================
-    // WET ASPHALT & WATER PUDDLE SIMULATION (Ground Puddles & Screen Reflections)
-    // =========================================================================
-    // Detect ground surfaces (flat horizontal surfaces near ground level)
+    // Opt-in Wet Asphalt & Puddle Simulation (never leaks onto dry furniture/shoes)
     float isGround = step(abs(vFragPos.y), 0.65) * step(0.70, N.y);
-
-    // Organic water puddles with wet gradient fringes (evaluated only on ground pixels!)
-    float effWet = clamp(uWetness, 0.0, 1.0);
+    float effWet = (uAllowWetPuddles == 1) ? clamp(uWetness, 0.0, 1.0) : 0.0;
     float puddle = 0.0;
     float wetFringe = 0.0;
     if (effWet > 0.01 && isGround > 0.0) {
@@ -1304,49 +1422,54 @@ void main() {
         }
     }
 
-    // Wet surfaces darken significantly
     albedo = mix(albedo, albedo * 0.35, wetFringe * 0.75 + puddle * 0.25);
+    float roughness = mix(baseRoughness, 0.04, puddle);
 
-    // Roughness: dry asphalt is rough (~0.8), puddles become mirror-smooth (0.02)
-    float roughness = mix(uRoughness, 0.02, puddle);
-
-    // Normal: in puddles, water levels out flat with subtle ripples
     vec3 effN = N;
     if (puddle > 0.01 && uShaderQuality >= 1) {
         float ripple = (sin(vFragPos.x * 20.0 + uTime * 2.8) + cos(vFragPos.z * 20.0 + uTime * 2.2)) * 0.018 * puddle;
         effN = normalize(mix(N, vec3(ripple, 1.0, -ripple), puddle * 0.88));
     }
 
-    vec3 F0 = vec3(0.04);
-    F0 = mix(F0, albedo, uMetallic);
+    vec3 F0 = mix(vec3(0.04), albedo, baseMetallic);
 
-    // 1. Sun / Moon Directional Direct Light (Cook-Torrance GGX)
     vec3 H = normalize(V + L);
     float NDF = DistributionGGX(effN, H, roughness);
     float G = GeometrySmith(effN, V, L, roughness);
     vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
 
     vec3 kS = F;
-    vec3 kD = (vec3(1.0) - kS) * (1.0 - uMetallic);
+    vec3 kD = (vec3(1.0) - kS) * (1.0 - baseMetallic);
     vec3 specular = (NDF * G * F) / (4.0 * max(dot(effN, V), 0.0) * max(dot(effN, L), 0.0) + 0.0001);
-
     float NdotL = max(dot(effN, L), 0.0);
 
-    // 3x3 PCF Directional Shadow Map Evaluation
+    // 3-Cascade 3x3 PCF Directional Shadow Map Evaluation
     float shadowFactor = 1.0;
     if (uShadowMapEnabled == 1 && uShaderQuality >= 1) {
-        vec3 projCoords = vFragPosLightSpace.xyz / max(vFragPosLightSpace.w, 0.0001);
+        int cascadeIdx = 0;
+        vec4 fragPosLS = vFragPosLightSpace0;
+        if (vViewDist > uCascadeSplits.x && uNumShadowCascades > 1) {
+            cascadeIdx = 1;
+            fragPosLS = vFragPosLightSpace1;
+        }
+        if (vViewDist > uCascadeSplits.y && uNumShadowCascades > 2) {
+            cascadeIdx = 2;
+            fragPosLS = vFragPosLightSpace2;
+        }
+
+        vec3 projCoords = fragPosLS.xyz / max(fragPosLS.w, 0.0001);
         projCoords = projCoords * 0.5 + 0.5;
         if (projCoords.x >= 0.01 && projCoords.x <= 0.99 &&
             projCoords.y >= 0.01 && projCoords.y <= 0.99 &&
             projCoords.z <= 0.998)
         {
-            float bias = max(0.0035 * (1.0 - dot(N, L)), 0.0012);
-            vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0));
+            float cScale = (cascadeIdx == 0) ? 1.0 : ((cascadeIdx == 1) ? 2.2 : 4.2);
+            float bias = max(0.0022 * (1.0 - max(dot(N, L), 0.0)), 0.0007) * cScale;
+            vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0).xy);
             float shadowAcc = 0.0;
             for (int sx = -1; sx <= 1; ++sx) {
                 for (int sy = -1; sy <= 1; ++sy) {
-                    float pcfDepth = texture(uShadowMap, projCoords.xy + vec2(sx, sy) * texelSize).r;
+                    float pcfDepth = texture(uShadowMap, vec3(projCoords.xy + vec2(sx, sy) * texelSize, float(cascadeIdx))).r;
                     shadowAcc += (projCoords.z - bias > pcfDepth) ? 0.42 : 1.0;
                 }
             }
@@ -1356,7 +1479,6 @@ void main() {
 
     vec3 directLight = (kD * albedo / PI + specular) * uSunColor * NdotL * shadowFactor;
 
-    // 2. Multi-Point Lights: Street Lamps, Neon Spotlights, and Player Aura
     vec3 pointLightAccum = vec3(0.0);
     for (int i = 0; i < uNumPointLights && i < MAX_POINT_LIGHTS; ++i) {
         vec3 pLightDir = uPointLightPos[i] - vFragPos;
@@ -1367,11 +1489,9 @@ void main() {
         float pDist = sqrt(pDistSq);
         vec3 pL = pLightDir / max(pDist, 0.001);
         float pNdotL = dot(effN, pL);
-        if (pNdotL <= 0.0) continue; // Early-out for back-facing surfaces
+        if (pNdotL <= 0.0) continue;
 
         vec3 pH = normalize(V + pL);
-
-        // Smooth quadratic attenuation
         float pNormDist = pDist / rad;
         float pAtten = clamp(1.0 - pNormDist * pNormDist, 0.0, 1.0);
         pAtten = (pAtten * pAtten) / (1.0 + 0.15 * pDist);
@@ -1381,79 +1501,63 @@ void main() {
         vec3 pF = fresnelSchlick(max(dot(pH, V), 0.0), F0);
 
         vec3 pkS = pF;
-        vec3 pkD = (vec3(1.0) - pkS) * (1.0 - uMetallic);
+        vec3 pkD = (vec3(1.0) - pkS) * (1.0 - baseMetallic);
         vec3 pSpecular = (pNDF * pG * pF) / (4.0 * NdotV * pNdotL + 0.0001);
-
         pointLightAccum += (pkD * albedo / PI + pSpecular) * uPointLightCol[i] * pNdotL * pAtten;
     }
 
-    // 3. Ambient & Environment Illumination
-    vec3 ambient = uAmbientColor * albedo;
+    vec3 ambient = uAmbientColor * albedo * baseAO;
     float groundBounce = max(-effN.y * 0.5 + 0.5, 0.0);
-    vec3 bounceLight = uAmbientColor * 0.25 * groundBounce * albedo;
+    vec3 bounceLight = uAmbientColor * 0.25 * groundBounce * albedo * baseAO;
 
-    // 4. Vertical Silhouette Rim Lighting
     float vertMask = clamp(1.0 - abs(N.y) * 1.6, 0.0, 1.0);
     float rimFactor = pow(clamp(1.0 - NdotV, 0.0, 1.0), 3.5) * vertMask;
     vec3 rimLight = mix(uAmbientColor * 1.5, uSunColor, 0.4) * rimFactor * 0.30;
 
-    // 5. Water Puddle Mirror Reflections (Spiegelungen)
     vec3 puddleReflection = vec3(0.0);
     if (puddle > 0.01) {
         vec3 R = reflect(-V, effN);
         vec3 waterFresnel = fresnelSchlick(max(dot(effN, V), 0.0), vec3(0.04));
-
-        // a) Night sky dome & celestial gradient reflection
         vec3 skyReflect = mix(uFogColor * 1.3, vec3(0.02, 0.035, 0.075), clamp(R.y, 0.0, 1.0));
+        skyReflect += uSunColor * pow(max(dot(R, L), 0.0), 180.0) * 3.5;
 
-        // b) Moon specular beam across wet street
-        float moonShimmer = pow(max(dot(R, L), 0.0), 180.0) * 3.5;
-        skyReflect += uSunColor * moonShimmer;
-
-        // c) Street lamps & neon reflection beams (Ultra & Balanced shader modes)
         if (uShaderQuality >= 1) {
             for (int i = 0; i < uNumPointLights && i < MAX_POINT_LIGHTS; ++i) {
                 vec3 toPl = normalize(uPointLightPos[i] - vFragPos);
                 float distPl = length(uPointLightPos[i] - vFragPos);
                 float attenPl = clamp(1.0 - (distPl / uPointLightRadius[i]), 0.0, 1.0);
-                float lampMirror = pow(max(dot(R, toPl), 0.0), 96.0) * 3.2;
-                skyReflect += uPointLightCol[i] * lampMirror * attenPl;
+                skyReflect += uPointLightCol[i] * pow(max(dot(R, toPl), 0.0), 96.0) * 3.2 * attenPl;
             }
-
-            // d) City skyline & neon horizon glow reflected at glancing angles
             float horizonGlow = smoothstep(0.0, 0.25, R.y) * smoothstep(0.75, 0.0, R.y);
-            vec3 neonHorizon = vec3(0.12, 0.08, 0.18) * horizonGlow;
-            skyReflect += neonHorizon;
+            skyReflect += vec3(0.12, 0.08, 0.18) * horizonGlow;
         }
-
         puddleReflection = skyReflect * waterFresnel * puddle;
     }
 
-    // 6. Emissive Radiant Glow (Windows, Shop signs, Neon billboards, Street lamp bulbs + Live BPM Beat Resonance)
     float beatBoost = 1.0 + 0.24 * clamp(uBeatPulse, 0.0, 1.0);
     vec3 emissiveLight = uEmissive * uGlowIntensity * beatBoost;
-    if (uHasTexture == 1 && length(uEmissive) > 0.01) {
-        // Multiplies the colorful storefront / neon texture content
+    if (uHasEmissiveMap == 1) {
+        vec3 emTex = texture(uEmissiveMap, vTexCoord).rgb;
+        vec3 emBase = (length(uEmissive) > 0.01) ? uEmissive : vec3(1.0);
+        emissiveLight = emTex * emBase * uGlowIntensity * beatBoost;
+    } else if (uHasTexture == 1 && length(uEmissive) > 0.01) {
         emissiveLight = texSample.rgb * uEmissive * 1.6 * uGlowIntensity * beatBoost;
     }
 
     vec3 color = ambient + directLight + pointLightAccum + bounceLight + rimLight + puddleReflection + emissiveLight;
 
-    // 7. Atmospheric Distance Depth Fog
     float dist = length(uCamPos - vFragPos);
-    float fogFactor = clamp((dist - 40.0) / 180.0, 0.0, 1.0);
-    fogFactor = smoothstep(0.0, 1.0, fogFactor);
+    float fogFactor = smoothstep(0.0, 1.0, clamp((dist - 40.0) / 180.0, 0.0, 1.0));
     color = mix(color, uFogColor, fogFactor);
 
-    // 8. ACES Filmic Tone Mapping (Professional cinematic contrast)
-    vec3 a = color * (2.51 * color + vec3(0.03));
-    vec3 b = color * (2.43 * color + vec3(0.59)) + vec3(0.14);
-    color = clamp(a / b, 0.0, 1.0);
+    if (uOutputLinearHDR == 0) {
+        vec3 a = color * (2.51 * color + vec3(0.03));
+        vec3 b = color * (2.43 * color + vec3(0.59)) + vec3(0.14);
+        color = clamp(a / b, 0.0, 1.0);
+        color = pow(color, vec3(1.0 / 2.2));
+    }
 
-    // Gamma Correction (sRGB standard)
-    color = pow(color, vec3(1.0 / 2.2));
-
-    FragColor = vec4(color, alpha);
+    FragColor = vec4(color, (uAlphaMode == 2) ? alpha : 1.0);
 }
 )";
 
@@ -1464,15 +1568,19 @@ void main() {
         pbrProg = glCreateProgram();
         glAttachShader(pbrProg, vs);
         glAttachShader(pbrProg, fs);
-        glLinkProgram(pbrProg);
-
+        bool pbrLinked = LinkProgram(pbrProg, "pbrProg");
         glDeleteShader(vs);
         glDeleteShader(fs);
+        if (!pbrLinked) { glDeleteProgram(pbrProg); pbrProg = 0; return false; }
 
+        BindBoneBlock(pbrProg);
         uMVPLoc = glGetUniformLocation(pbrProg, "uMVP");
         uModelLoc = glGetUniformLocation(pbrProg, "uModel");
         uNormalMatLoc = glGetUniformLocation(pbrProg, "uNormalMatrix");
         uLightSpaceMatrixLoc = glGetUniformLocation(pbrProg, "uLightSpaceMatrix");
+        if (uLightSpaceMatrixLoc == -1) uLightSpaceMatrixLoc = glGetUniformLocation(pbrProg, "uLightSpaceMatrix[0]");
+        uCascadeSplitsLoc = glGetUniformLocation(pbrProg, "uCascadeSplits");
+        uNumShadowCascadesLoc = glGetUniformLocation(pbrProg, "uNumShadowCascades");
         uShadowMapLoc = glGetUniformLocation(pbrProg, "uShadowMap");
         uShadowMapEnabledLoc = glGetUniformLocation(pbrProg, "uShadowMapEnabled");
         uBeatPulseLoc = glGetUniformLocation(pbrProg, "uBeatPulse");
@@ -1483,6 +1591,7 @@ void main() {
         uAlbedoLoc = glGetUniformLocation(pbrProg, "uAlbedo");
         uMetallicLoc = glGetUniformLocation(pbrProg, "uMetallic");
         uRoughnessLoc = glGetUniformLocation(pbrProg, "uRoughness");
+        uAmbientOcclusionLoc = glGetUniformLocation(pbrProg, "uAmbientOcclusion");
         uEmissiveLoc = glGetUniformLocation(pbrProg, "uEmissive");
         uTimeLoc = glGetUniformLocation(pbrProg, "uTime");
         uNumPointLightsLoc = glGetUniformLocation(pbrProg, "uNumPointLights");
@@ -1490,13 +1599,27 @@ void main() {
         uPointLightColLoc = glGetUniformLocation(pbrProg, "uPointLightCol");
         uPointLightRadiusLoc = glGetUniformLocation(pbrProg, "uPointLightRadius");
         uAlbedoMapLoc = glGetUniformLocation(pbrProg, "uAlbedoMap");
+        uNormalMapLoc = glGetUniformLocation(pbrProg, "uNormalMap");
+        uMRMapLoc = glGetUniformLocation(pbrProg, "uMRMap");
+        uAOMapLoc = glGetUniformLocation(pbrProg, "uAOMap");
+        uEmissiveMapLoc = glGetUniformLocation(pbrProg, "uEmissiveMap");
         uHasTextureLoc = glGetUniformLocation(pbrProg, "uHasTexture");
+        uHasNormalMapLoc = glGetUniformLocation(pbrProg, "uHasNormalMap");
+        uHasMRMapLoc = glGetUniformLocation(pbrProg, "uHasMRMap");
+        uHasAOMapLoc = glGetUniformLocation(pbrProg, "uHasAOMap");
+        uHasEmissiveMapLoc = glGetUniformLocation(pbrProg, "uHasEmissiveMap");
+        uAlphaModeLoc = glGetUniformLocation(pbrProg, "uAlphaMode");
+        uAlphaCutoffLoc = glGetUniformLocation(pbrProg, "uAlphaCutoff");
+        uAllowWetPuddlesLoc = glGetUniformLocation(pbrProg, "uAllowWetPuddles");
+        uUseSkinningLoc = glGetUniformLocation(pbrProg, "uUseSkinning");
+        uFootOffsetLoc = glGetUniformLocation(pbrProg, "uFootOffset");
+        uOutputLinearHDRLoc = glGetUniformLocation(pbrProg, "uOutputLinearHDR");
         uFogColorLoc = glGetUniformLocation(pbrProg, "uFogColor");
         uWetnessLoc = glGetUniformLocation(pbrProg, "uWetness");
         uGlowIntensityLoc = glGetUniformLocation(pbrProg, "uGlowIntensity");
         uShaderQualityLoc = glGetUniformLocation(pbrProg, "uShaderQuality");
 
-        // 3. Fullscreen Quad Blit Shader
+        // 3. Fullscreen Quad Blit Shader (Note: quadTexCoords in screen-top-left convention; FBO pass uses GL UV!)
         const char* qVS = R"(
 #version 330 core
 layout (location = 0) in vec2 aPos;
@@ -1507,7 +1630,6 @@ void main() {
     gl_Position = vec4(aPos, 0.0, 1.0);
 }
 )";
-
         const char* qFS = R"(
 #version 330 core
 out vec4 FragColor;
@@ -1517,7 +1639,6 @@ void main() {
     FragColor = texture(uTexture, TexCoord);
 }
 )";
-
         GLuint qvs = CompileShader(GL_VERTEX_SHADER, qVS);
         GLuint qfs = CompileShader(GL_FRAGMENT_SHADER, qFS);
         if (!qvs || !qfs) return false;
@@ -1525,12 +1646,96 @@ void main() {
         quadProg = glCreateProgram();
         glAttachShader(quadProg, qvs);
         glAttachShader(quadProg, qfs);
-        glLinkProgram(quadProg);
-
+        bool quadLinked = LinkProgram(quadProg, "quadProg");
         glDeleteShader(qvs);
         glDeleteShader(qfs);
+        if (!quadLinked) { glDeleteProgram(quadProg); quadProg = 0; return false; }
 
-        // 4. Celestial Sky Dome Shader (Infinite horizon, zenith gradient, sun/moon disc & stars)
+        // FBO post-process vertex shader uses standard bottom-up FBO texture coordinates (aPos * 0.5 + 0.5)
+        const char* postVS = R"(
+#version 330 core
+layout (location = 0) in vec2 aPos;
+out vec2 TexCoord;
+void main() {
+    TexCoord = aPos * 0.5 + 0.5;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+)";
+        const char* bloomExtractFS = R"(
+#version 330 core
+out vec4 FragColor;
+in vec2 TexCoord;
+uniform sampler2D uHdrTex;
+uniform float uThreshold;
+void main() {
+    vec3 col = texture(uHdrTex, TexCoord).rgb;
+    float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    float soft = clamp((lum - uThreshold) / max(lum, 0.0001), 0.0, 1.0);
+    FragColor = vec4(col * soft, 1.0);
+}
+)";
+        const char* bloomBlurFS = R"(
+#version 330 core
+out vec4 FragColor;
+in vec2 TexCoord;
+uniform sampler2D uTex;
+uniform int uHorizontal;
+void main() {
+    const float w[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    vec2 texOffset = 1.0 / vec2(textureSize(uTex, 0));
+    vec3 res = texture(uTex, TexCoord).rgb * w[0];
+    vec2 dir = (uHorizontal == 1) ? vec2(texOffset.x, 0.0) : vec2(0.0, texOffset.y);
+    for (int i = 1; i < 5; ++i) {
+        res += texture(uTex, TexCoord + dir * float(i)).rgb * w[i];
+        res += texture(uTex, TexCoord - dir * float(i)).rgb * w[i];
+    }
+    FragColor = vec4(res, 1.0);
+}
+)";
+        const char* hdrCompositeFS = R"(
+#version 330 core
+out vec4 FragColor;
+in vec2 TexCoord;
+uniform sampler2D uHdrTex;
+uniform sampler2D uBloomTex;
+uniform float uBloomIntensity;
+uniform float uExposure;
+void main() {
+    vec3 hdr = texture(uHdrTex, TexCoord).rgb + texture(uBloomTex, TexCoord).rgb * uBloomIntensity;
+    hdr *= uExposure;
+    vec3 a = hdr * (2.51 * hdr + vec3(0.03));
+    vec3 b = hdr * (2.43 * hdr + vec3(0.59)) + vec3(0.14);
+    vec3 col = clamp(a / b, 0.0, 1.0);
+    col = pow(col, vec3(1.0 / 2.2));
+    FragColor = vec4(col, 1.0);
+}
+)";
+        auto buildPost = [&](const char* fsCode, const char* name) -> GLuint {
+            GLuint pvs = CompileShader(GL_VERTEX_SHADER, postVS);
+            GLuint pfs = CompileShader(GL_FRAGMENT_SHADER, fsCode);
+            if (!pvs || !pfs) { if (pvs) glDeleteShader(pvs); if (pfs) glDeleteShader(pfs); return 0; }
+            GLuint p = glCreateProgram();
+            glAttachShader(p, pvs);
+            glAttachShader(p, pfs);
+            bool ok = LinkProgram(p, name);
+            glDeleteShader(pvs);
+            glDeleteShader(pfs);
+            if (!ok) { glDeleteProgram(p); return 0; }
+            return p;
+        };
+        bloomExtractProg = buildPost(bloomExtractFS, "bloomExtractProg");
+        if (bloomExtractProg) uBloomThresholdLoc = glGetUniformLocation(bloomExtractProg, "uThreshold");
+        bloomBlurProg = buildPost(bloomBlurFS, "bloomBlurProg");
+        if (bloomBlurProg) uBloomBlurHorizLoc = glGetUniformLocation(bloomBlurProg, "uHorizontal");
+        hdrCompositeProg = buildPost(hdrCompositeFS, "hdrCompositeProg");
+        if (hdrCompositeProg) {
+            uCompositeHdrLoc = glGetUniformLocation(hdrCompositeProg, "uHdrTex");
+            uCompositeBloomLoc = glGetUniformLocation(hdrCompositeProg, "uBloomTex");
+            uCompositeBloomIntLoc = glGetUniformLocation(hdrCompositeProg, "uBloomIntensity");
+            uCompositeExposureLoc = glGetUniformLocation(hdrCompositeProg, "uExposure");
+        }
+
+        // 4. Celestial Sky Dome Shader
         const char* skyVS = R"(
 #version 330 core
 layout (location = 0) in vec2 aPos;
@@ -1540,7 +1745,6 @@ void main() {
     gl_Position = vec4(aPos, 0.99999, 1.0);
 }
 )";
-
         const char* skyFS = R"(
 #version 330 core
 out vec4 FragColor;
@@ -1553,6 +1757,7 @@ uniform vec3 uGroundColor;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform float uIsNight;
+uniform int uOutputLinearHDR;
 
 float hash(vec3 p) {
     p = fract(p * 0.3183099 + 0.1);
@@ -1570,7 +1775,6 @@ void main() {
         float t = pow(ray.y, 0.55);
         sky = mix(uHorizonColor, uZenithColor, t);
 
-        // Sun / Moon Disc & Atmospheric Corona
         vec3 sDir = normalize(uSunDir);
         float sunDot = max(dot(ray, sDir), 0.0);
         if (uIsNight > 0.5) {
@@ -1583,7 +1787,6 @@ void main() {
             sky += (sunDisc + sunGlow) * uSunColor;
         }
 
-        // Twinkling stars in night mode
         if (uIsNight > 0.5) {
             vec3 starGrid = floor(ray * 520.0);
             float h = hash(starGrid);
@@ -1597,25 +1800,26 @@ void main() {
         sky = mix(uHorizonColor, uGroundColor, t);
     }
 
-    // ACES Filmic Tone Mapping & Gamma Correction
-    vec3 a = sky * (2.51 * sky + vec3(0.03));
-    vec3 b = sky * (2.43 * sky + vec3(0.59)) + vec3(0.14);
-    sky = clamp(a / b, 0.0, 1.0);
-    sky = pow(sky, vec3(1.0 / 2.2));
+    if (uOutputLinearHDR == 0) {
+        vec3 a = sky * (2.51 * sky + vec3(0.03));
+        vec3 b = sky * (2.43 * sky + vec3(0.59)) + vec3(0.14);
+        sky = clamp(a / b, 0.0, 1.0);
+        sky = pow(sky, vec3(1.0 / 2.2));
+    }
 
     FragColor = vec4(sky, 1.0);
 }
 )";
-
         GLuint svs = CompileShader(GL_VERTEX_SHADER, skyVS);
         GLuint sfs = CompileShader(GL_FRAGMENT_SHADER, skyFS);
         if (svs && sfs) {
             skyProg = glCreateProgram();
             glAttachShader(skyProg, svs);
             glAttachShader(skyProg, sfs);
-            glLinkProgram(skyProg);
+            bool skyLinked = LinkProgram(skyProg, "skyProg");
             glDeleteShader(svs);
             glDeleteShader(sfs);
+            if (!skyLinked) { glDeleteProgram(skyProg); skyProg = 0; return false; }
 
             uSkyInvVPLoc = glGetUniformLocation(skyProg, "uInvViewProj");
             uSkyZenithLoc = glGetUniformLocation(skyProg, "uZenithColor");
@@ -1624,6 +1828,7 @@ void main() {
             uSkySunDirLoc = glGetUniformLocation(skyProg, "uSunDir");
             uSkySunColLoc = glGetUniformLocation(skyProg, "uSunColor");
             uSkyIsNightLoc = glGetUniformLocation(skyProg, "uIsNight");
+            uSkyOutputLinearHDRLoc = glGetUniformLocation(skyProg, "uOutputLinearHDR");
         }
 
         return true;
@@ -1647,10 +1852,7 @@ void main() {
     }
 
     void SetupFullscreenQuad() {
-        // Quad vertices (Position X, Y, TexCoord U, V)
-        // Flip V so (0,0) in framebuffer top-left renders top-left
         float quadVertices[] = {
-            // Pos         // UV
             -1.0f,  1.0f,  0.0f, 0.0f,
             -1.0f, -1.0f,  0.0f, 1.0f,
              1.0f, -1.0f,  1.0f, 1.0f,
@@ -1669,7 +1871,6 @@ void main() {
 
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
         glEnableVertexAttribArray(0);
-
         glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
         glEnableVertexAttribArray(1);
 
@@ -1677,14 +1878,12 @@ void main() {
     }
 
     void SetupTextures() {
-        // Screen Texture
         glGenTextures(1, &screenTex);
         glBindTexture(GL_TEXTURE_2D, screenTex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, screenWidth, screenHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-        // HUD Texture
         glGenTextures(1, &hudTex);
         glBindTexture(GL_TEXTURE_2D, hudTex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, screenWidth, screenHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
@@ -1692,18 +1891,28 @@ void main() {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     }
 
+    void SetupBoneUBO() {
+        glGenBuffers(1, &boneUBO);
+        glBindBuffer(GL_UNIFORM_BUFFER, boneUBO);
+        glBufferData(GL_UNIFORM_BUFFER, MAX_GPU_BONES * sizeof(float) * 16, nullptr, GL_DYNAMIC_DRAW);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 0, boneUBO);
+        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    }
+
     void SetupShadowMap() {
         glGenFramebuffers(1, &shadowFBO);
         glGenTextures(1, &shadowDepthTex);
-        glBindTexture(GL_TEXTURE_2D, shadowDepthTex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, shadowDepthTex);
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT24,
+                     SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, NUM_SHADOW_CASCADES,
+                     0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
         glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowDepthTex, 0);
+        glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowDepthTex, 0, 0);
         glDrawBuffer(GL_NONE);
         glReadBuffer(GL_NONE);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
@@ -1713,6 +1922,52 @@ void main() {
             shadowDepthTex = 0;
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
+    void SetupHDRPipeline() {
+        glGenFramebuffers(1, &hdrFBO);
+        glGenTextures(1, &hdrColorTex);
+        glGenRenderbuffers(1, &hdrDepthRBO);
+        glGenFramebuffers(2, bloomFBO);
+        glGenTextures(2, bloomTex);
+        ResizeHDRTargets();
+    }
+
+    void ResizeHDRTargets() {
+        if (!hdrFBO || !hdrColorTex || !hdrDepthRBO) return;
+        bloomWidth = std::max(1u, screenWidth / 2);
+        bloomHeight = std::max(1u, screenHeight / 2);
+
+        glBindTexture(GL_TEXTURE_2D, hdrColorTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, screenWidth, screenHeight, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glBindRenderbuffer(GL_RENDERBUFFER, hdrDepthRBO);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, screenWidth, screenHeight);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, hdrFBO);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, hdrColorTex, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, hdrDepthRBO);
+        bool hdrOk = (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+        bool bloomOk = true;
+        for (int i = 0; i < 2; ++i) {
+            glBindTexture(GL_TEXTURE_2D, bloomTex[i]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, bloomWidth, bloomHeight, 0, GL_RGBA, GL_FLOAT, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+            glBindFramebuffer(GL_FRAMEBUFFER, bloomFBO[i]);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, bloomTex[i], 0);
+            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) bloomOk = false;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        hdrPipelineReady = hdrOk && bloomOk && (bloomExtractProg != 0) && (bloomBlurProg != 0) && (hdrCompositeProg != 0);
     }
 };
 
