@@ -1376,7 +1376,7 @@ public:
     float meovvChoreoClock = 0.0f;
     bool meovvStageChoreoActive = true;
 
-    void UpdateAnimations(float dt, SurrealWorld* world = nullptr, const Frustum* camFrustum = nullptr, const Vec3* camPos = nullptr) {
+    void UpdateAnimations(float dt, SurrealWorld* world = nullptr, const Frustum* camFrustum = nullptr, const Vec3* camPos = nullptr, bool cpuDeform = true) {
         ++animFrameCounter;
         float tempoScale = std::clamp(activeStageBPM / 128.0f, 0.65f, 1.60f);
         meovvChoreoClock += dt * tempoScale;
@@ -1386,9 +1386,9 @@ public:
             if (!skel) continue;
             ++idx;
 
-            // Always run full deformation on first initialization frame
+            // Always initialize foot-base offset & static attributes on first frame
             if (!skel->hasFootBaseOffset || !skel->staticAttributesInitialized) {
-                skel->Update(dt);
+                skel->Update(dt, true);
                 continue;
             }
 
@@ -1449,13 +1449,12 @@ public:
                 }
             }
 
-            // Gen 4833/4834 Topological Manifold Pruning: Cull off-screen NPC skeletal deformation
+            // Frustum culling: advance animation clock without CPU skinning when off-screen
             if (world && camFrustum) {
                 auto itTr = world->transforms.find(pair.first);
                 if (itTr != world->transforms.end()) {
                     Vec3 center = itTr->second.position + Vec3(0.0f, 1.0f, 0.0f);
                     if (!camFrustum->IsSphereVisible(center, 2.5f)) {
-                        // Advance clock without CPU vertex skinning while outside view frustum
                         if (skel->activeClipIndex >= 0 && skel->activeClipIndex < (int)skel->clips.size()) {
                             const float dur = skel->clips[skel->activeClipIndex].duration;
                             if (dur > 0.0f) {
@@ -1464,19 +1463,23 @@ public:
                         }
                         continue;
                     }
-                    if (camPos && (*camPos - itTr->second.position).Length() > 22.0f && ((animFrameCounter + idx) & 3) != 0) {
+                    if (cpuDeform && camPos && (*camPos - itTr->second.position).Length() > 22.0f && ((animFrameCounter + idx) & 3) != 0) {
                         continue;
                     }
                 }
             }
 
-            // Interleave multi-character skeletal deformation across odd/even frames (smooth 30 Hz skinning per NPC, 60+ FPS engine)
-            if (animatedEntities.size() >= 3) {
+            bool doCpuDeform = cpuDeform || !skel->HasSkinData();
+            if (!doCpuDeform) {
+                // GPU LBS mode: compute lightweight bone matrices every visible frame at full framerate
+                skel->Update(dt, false);
+            } else if (animatedEntities.size() >= 3) {
+                // CPU fallback interleaves multi-character vertex deformation across odd/even frames
                 if (((animFrameCounter + idx) & 1) == 0) {
-                    skel->Update(dt * 2.0f);
+                    skel->Update(dt * 2.0f, true);
                 }
             } else {
-                skel->Update(dt);
+                skel->Update(dt, true);
             }
         }
     }
@@ -1489,21 +1492,31 @@ public:
     {
         SetStatus("[*] Aion Auto-Rigger: Segmenting group photo & synthesizing skeletons...", 5.0f);
 
+        const std::string resolvedGroupPath = surreal::paths::DefaultRigGroupImage(groupImagePath);
+        std::vector<std::shared_ptr<SurrealMesh>> oldMeovvMeshes;
+
         // Delete any old group or previous MEOVV entities if present
         for (size_t i = entities.size(); i > 0; --i) {
             size_t idx = i - 1;
             if (entities[idx].name.find("meovv") != std::string::npos ||
                 entities[idx].name.find("MEOVV_") != std::string::npos) {
+                auto itMr = world.meshRenderers.find(entities[idx].id);
+                if (itMr != world.meshRenderers.end() && itMr->second.mesh) {
+                    oldMeovvMeshes.push_back(itMr->second.mesh);
+                }
                 animatedEntities.erase(entities[idx].id);
                 world.DestroyEntity(entities[idx].id);
                 entities.erase(entities.begin() + idx);
             }
         }
+        for (const auto& m : oldMeovvMeshes) {
+            EvictMeshIfUnreferenced(m, world);
+        }
 
         Image3DOptions opt;
         opt.ironingPasses = 1440;
         opt.heightMeters = 2.20f;
-        auto figures = SurrealAutoRigger::SegmentGroupAndRig(groupImagePath, opt, spacingOffset);
+        auto figures = SurrealAutoRigger::SegmentGroupAndRig(resolvedGroupPath, opt, spacingOffset);
         if (figures.empty()) {
             SetStatus("[-] Auto-Rigger failed to segment group.", 4.0f);
             return false;
@@ -1537,6 +1550,8 @@ public:
             ed.roughness = 0.85f;
             ed.isStaticTerrain = false;
             ed.isCharacter = true;
+            ed.assetPath = resolvedGroupPath;
+            ed.presetType = ModelPresetType::CUSTOM_FILE;
 
             entities.push_back(ed);
             if (firstAddedIdx == -1) firstAddedIdx = static_cast<int>(entities.size() - 1);
@@ -1550,7 +1565,7 @@ public:
         flyCamPos = Vec3(0.0f, 1.35f, 7.8f);
         flyCamPitch = -0.05f;
         flyCamYaw = 0.0f;
-        SyncObstacles(obstacles);
+        SyncObstacles(obstacles, &world);
         SetStatus("[✓] 5 MEOVV figures rigged & segmented! Select [N/P] to move individually.", 6.0f);
         return true;
     }
@@ -1596,41 +1611,61 @@ public:
 
     // Save Level to JSON
     bool SaveLevel(const std::string& filepath) {
+        surreal::json::JsonValue root = surreal::json::JsonValue::MakeObject();
+        root.Set("engine", surreal::json::JsonValue::MakeString("AION Surreal 3D Engine"));
+        root.Set("version", surreal::json::JsonValue::MakeNumber(2.0));
+        root.Set("entity_count", surreal::json::JsonValue::MakeNumber(static_cast<double>(entities.size())));
+
+        surreal::json::JsonValue arr = surreal::json::JsonValue::MakeArray();
+        for (const auto& e : entities) {
+            surreal::json::JsonValue obj = surreal::json::JsonValue::MakeObject();
+            obj.Set("id", surreal::json::JsonValue::MakeNumber(static_cast<double>(e.id)));
+            obj.Set("name", surreal::json::JsonValue::MakeString(e.name));
+            obj.Set("type", surreal::json::JsonValue::MakeString(
+                e.isStaticTerrain ? "TERRAIN" : (e.isCharacter ? "AVATAR" : "PLATFORM")));
+            if (!e.assetPath.empty()) {
+                obj.Set("asset_path", surreal::json::JsonValue::MakeString(e.assetPath));
+            }
+            obj.Set("preset", surreal::json::JsonValue::MakeNumber(static_cast<double>(static_cast<int>(e.presetType))));
+
+            auto makeVec3 = [](const Vec3& v) {
+                surreal::json::JsonValue a = surreal::json::JsonValue::MakeArray();
+                a.Push(surreal::json::JsonValue::MakeNumber(v.x));
+                a.Push(surreal::json::JsonValue::MakeNumber(v.y));
+                a.Push(surreal::json::JsonValue::MakeNumber(v.z));
+                return a;
+            };
+            auto makeColor = [](const ColorRGB& c) {
+                surreal::json::JsonValue a = surreal::json::JsonValue::MakeArray();
+                a.Push(surreal::json::JsonValue::MakeNumber(c.r));
+                a.Push(surreal::json::JsonValue::MakeNumber(c.g));
+                a.Push(surreal::json::JsonValue::MakeNumber(c.b));
+                return a;
+            };
+
+            obj.Set("position", makeVec3(e.position));
+            obj.Set("scale", makeVec3(e.scale));
+            obj.Set("yaw", surreal::json::JsonValue::MakeNumber(e.yaw));
+            obj.Set("color", makeColor(e.color));
+            obj.Set("metallic", surreal::json::JsonValue::MakeNumber(e.metallic));
+            obj.Set("roughness", surreal::json::JsonValue::MakeNumber(e.roughness));
+            arr.Push(std::move(obj));
+        }
+        root.Set("entities", std::move(arr));
+
         std::ofstream file(filepath);
         if (!file.is_open()) {
             SetStatus("[-] Error saving level to " + filepath);
             return false;
         }
-
-        file << "{\n";
-        file << "  \"engine\": \"AION Surreal 3D Engine\",\n";
-        file << "  \"version\": 1.0,\n";
-        file << "  \"entity_count\": " << entities.size() << ",\n";
-        file << "  \"entities\": [\n";
-
-        for (size_t i = 0; i < entities.size(); ++i) {
-            const auto& e = entities[i];
-            file << "    {\n";
-            file << "      \"id\": " << e.id << ",\n";
-            file << "      \"name\": \"" << e.name << "\",\n";
-            file << "      \"type\": \"" << (e.isStaticTerrain ? "TERRAIN" : (e.isCharacter ? "AVATAR" : "PLATFORM")) << "\",\n";
-            file << "      \"position\": [" << e.position.x << ", " << e.position.y << ", " << e.position.z << "],\n";
-            file << "      \"scale\": [" << e.scale.x << ", " << e.scale.y << ", " << e.scale.z << "],\n";
-            file << "      \"color\": [" << e.color.r << ", " << e.color.g << ", " << e.color.b << "],\n";
-            file << "      \"metallic\": " << e.metallic << ",\n";
-            file << "      \"roughness\": " << e.roughness << "\n";
-            file << "    }" << (i + 1 < entities.size() ? "," : "") << "\n";
-        }
-
-        file << "  ]\n";
-        file << "}\n";
+        file << root.Dump(2) << "\n";
         file.close();
 
         SetStatus("[✓] LEVEL SAVED -> " + filepath, 4.0f);
         return true;
     }
 
-    // Load Level from JSON
+    // Load Level from JSON (supports asset_path, presets, yaw, and legacy v1 files)
     bool LoadLevel(const std::string& filepath, SurrealWorld& world, std::vector<ObstacleBox>& obstacles) {
         std::ifstream file(filepath);
         if (!file.is_open()) {
@@ -1641,109 +1676,235 @@ public:
         std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
         file.close();
 
+        surreal::json::JsonValue root;
+        if (!surreal::json::Parse(content, root) || !root.IsObject()) {
+            SetStatus("[-] Invalid level JSON: " + filepath, 4.0f);
+            return false;
+        }
+        const auto* entsArr = root.Find("entities");
+        if (!entsArr || !entsArr->IsArray()) {
+            SetStatus("[-] Missing 'entities' array in " + filepath, 4.0f);
+            return false;
+        }
+
+        PushUndoSnapshot(world, "Load " + filepath);
+
         std::vector<EditableEntity> kept;
+        std::vector<std::shared_ptr<SurrealMesh>> droppedMeshes;
         for (const auto& e : entities) {
             if (e.isStaticTerrain || e.isCharacter) {
                 kept.push_back(e);
             } else {
+                auto itMr = world.meshRenderers.find(e.id);
+                if (itMr != world.meshRenderers.end() && itMr->second.mesh) {
+                    droppedMeshes.push_back(itMr->second.mesh);
+                }
+                animatedEntities.erase(e.id);
                 world.DestroyEntity(e.id);
             }
         }
-        entities = kept;
+        entities = std::move(kept);
+        for (const auto& m : droppedMeshes) {
+            EvictMeshIfUnreferenced(m, world);
+        }
 
-        size_t pos = 0;
-        while ((pos = content.find("\"name\":", pos)) != std::string::npos) {
-            size_t nameStart = content.find("\"", pos + 7) + 1;
-            size_t nameEnd = content.find("\"", nameStart);
-            std::string name = content.substr(nameStart, nameEnd - nameStart);
+        auto parseVec3 = [](const surreal::json::JsonValue* arr, const Vec3& def) -> Vec3 {
+            if (!arr || !arr->IsArray() || arr->arrVal.size() < 3) return def;
+            return Vec3(arr->arrVal[0].AsFloat(def.x),
+                        arr->arrVal[1].AsFloat(def.y),
+                        arr->arrVal[2].AsFloat(def.z));
+        };
+        auto parseColor = [](const surreal::json::JsonValue* arr, const ColorRGB& def) -> ColorRGB {
+            if (!arr || !arr->IsArray() || arr->arrVal.size() < 3) return def;
+            return ColorRGB(arr->arrVal[0].AsFloat(def.r),
+                            arr->arrVal[1].AsFloat(def.g),
+                            arr->arrVal[2].AsFloat(def.b));
+        };
 
-            if (name == "CyberGridFloor" || name == "SurrealAvatarPrime") {
-                pos = nameEnd;
+        for (const auto& item : entsArr->arrVal) {
+            if (!item.IsObject()) continue;
+            std::string name = item.GetString("name", "");
+            if (name.empty()) continue;
+
+            // Avoid duplicating core scene entities that are already alive
+            bool alreadyKept = false;
+            for (const auto& k : entities) {
+                if (k.name == name && (k.isStaticTerrain || k.isCharacter)) {
+                    alreadyKept = true;
+                    break;
+                }
+            }
+            if (alreadyKept || name == "CyberGridFloor" || name == "MetropolisGroundFloor" || name == "SurrealAvatarPrime") {
                 continue;
             }
 
-            Vec3 p(0, 0.5f, 0);
-            size_t pStart = content.find("\"position\":", nameEnd);
-            if (pStart != std::string::npos) {
-                size_t b0 = content.find("[", pStart) + 1;
-                size_t b1 = content.find("]", b0);
-                std::stringstream ss(content.substr(b0, b1 - b0));
-                char comma;
-                ss >> p.x >> comma >> p.y >> comma >> p.z;
+            std::string typeStr = item.GetString("type", "PLATFORM");
+            std::string assetPath = item.GetString("asset_path", "");
+            int presetInt = item.GetInt("preset", static_cast<int>(ModelPresetType::CRATE));
+            Vec3 p = parseVec3(item.Find("position"), Vec3(0, 0.5f, 0));
+            Vec3 s = parseVec3(item.Find("scale"), Vec3(1.0f, 1.0f, 1.0f));
+            float yaw = item.GetFloat("yaw", 0.0f);
+            ColorRGB col = parseColor(item.Find("color"), ColorRGB(1.0f, 1.0f, 1.0f));
+            float m = item.GetFloat("metallic", 0.35f);
+            float r = item.GetFloat("roughness", 0.40f);
+
+            std::shared_ptr<SurrealMesh> loadedMesh;
+            std::shared_ptr<SkeletalMeshInstance> loadedSkeletal;
+
+            if (!assetPath.empty()) {
+                std::string resolved = surreal::paths::ResolvePath(assetPath);
+                std::string lowerExt;
+                size_t dot = resolved.find_last_of('.');
+                if (dot != std::string::npos) {
+                    lowerExt = resolved.substr(dot);
+                    for (char& ch : lowerExt) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                }
+                std::error_code ec;
+                if (std::filesystem::exists(resolved, ec)) {
+                    if (lowerExt == ".gltf" || lowerExt == ".glb") {
+                        auto inst = std::make_shared<SkeletalMeshInstance>();
+                        if (SurrealSkeletalLoader::LoadSkeletalModel(resolved, *inst) && inst->activeDeformedMesh) {
+                            loadedMesh = inst->activeDeformedMesh;
+                            if (inst->HasSkinData() || !inst->clips.empty()) {
+                                loadedSkeletal = inst;
+                            }
+                        }
+                    } else if (lowerExt == ".png" || lowerExt == ".jpg" || lowerExt == ".jpeg" ||
+                               lowerExt == ".bmp" || lowerExt == ".webp" || lowerExt == ".tga") {
+                        Image3DOptions opt;
+                        loadedMesh = SurrealImage3D::BuildFromFile(resolved, opt, nullptr);
+                    } else {
+                        SurrealModelLoader::LoadCustomFile(resolved, loadedMesh, col);
+                    }
+                    assetPath = resolved;
+                }
             }
 
-            Vec3 s(1.0f, 1.0f, 1.0f);
-            size_t sStart = content.find("\"scale\":", nameEnd);
-            if (sStart != std::string::npos) {
-                size_t b0 = content.find("[", sStart) + 1;
-                size_t b1 = content.find("]", b0);
-                std::stringstream ss(content.substr(b0, b1 - b0));
-                char comma;
-                ss >> s.x >> comma >> s.y >> comma >> s.z;
-            }
-
-            ColorRGB col(1.0f, 1.0f, 1.0f);
-            size_t cStart = content.find("\"color\":", nameEnd);
-            if (cStart != std::string::npos) {
-                size_t b0 = content.find("[", cStart) + 1;
-                size_t b1 = content.find("]", b0);
-                std::stringstream ss(content.substr(b0, b1 - b0));
-                char comma;
-                ss >> col.r >> comma >> col.g >> comma >> col.b;
-            }
-
-            float m = 0.35f, r = 0.40f;
-            size_t mStart = content.find("\"metallic\":", nameEnd);
-            if (mStart != std::string::npos) {
-                size_t valStart = mStart + 11;
-                m = std::stof(content.substr(valStart, 6));
-            }
-            size_t rStart = content.find("\"roughness\":", nameEnd);
-            if (rStart != std::string::npos) {
-                size_t valStart = rStart + 12;
-                r = std::stof(content.substr(valStart, 6));
+            ModelPresetType resolvedPreset = static_cast<ModelPresetType>(presetInt);
+            if (!loadedMesh) {
+                switch (resolvedPreset) {
+                    case ModelPresetType::RAMP:
+                        loadedMesh = SurrealModelLoader::CreateRamp(Vec3(1.0f, 1.0f, 1.0f), col);
+                        break;
+                    case ModelPresetType::MONOLITH:
+                        loadedMesh = SurrealModelLoader::CreateMonolith(Vec3(1.0f, 1.0f, 1.0f), col);
+                        break;
+                    case ModelPresetType::ORB:
+                        loadedMesh = SurrealModelLoader::CreateOrb(0.5f, 18, 24, col);
+                        break;
+                    default:
+                        loadedMesh = SurrealTerrainBuilder::CreateBox(Vec3(1.0f, 1.0f, 1.0f), col);
+                        resolvedPreset = ModelPresetType::CRATE;
+                        break;
+                }
             }
 
             EntityID platEntity = world.CreateEntity(name);
             TransformComponent& pt = world.transforms[platEntity];
             pt.position = p;
+            pt.scale = s;
+            pt.rotation = Quat::FromAxisAngle(Vec3(0, 1.0f, 0), yaw);
 
             MeshRendererComponent platRenderer;
-            platRenderer.mesh = SurrealTerrainBuilder::CreateBox(s, col);
+            platRenderer.mesh = loadedMesh;
             platRenderer.material.albedo = col;
             platRenderer.material.metallic = m;
             platRenderer.material.roughness = r;
             world.meshRenderers[platEntity] = platRenderer;
+
+            if (loadedSkeletal) {
+                animatedEntities[platEntity] = loadedSkeletal;
+            }
 
             EditableEntity ed;
             ed.id = platEntity;
             ed.name = name;
             ed.position = p;
             ed.scale = s;
+            ed.yaw = yaw;
             ed.color = col;
             ed.metallic = m;
             ed.roughness = r;
-            ed.isStaticTerrain = false;
-            ed.isCharacter = false;
+            ed.assetPath = assetPath;
+            ed.presetType = resolvedPreset;
+            ed.isStaticTerrain = (typeStr == "TERRAIN");
+            ed.isCharacter = (typeStr == "AVATAR");
 
             entities.push_back(ed);
-            pos = nameEnd;
         }
 
-        selectedIndex = std::min(selectedIndex, static_cast<int>(entities.size() - 1));
-        SyncObstacles(obstacles);
+        if (entities.empty()) {
+            selectedIndex = -1;
+        } else {
+            selectedIndex = std::clamp(selectedIndex, 0, static_cast<int>(entities.size() - 1));
+        }
+        SyncObstacles(obstacles, &world);
         SetStatus("[✓] LEVEL LOADED -> " + filepath, 4.0f);
         return true;
     }
 
-    void SyncObstacles(std::vector<ObstacleBox>& obstacles) {
+    void SyncObstacles(std::vector<ObstacleBox>& obstacles, const SurrealWorld* world = nullptr) {
         obstacles.clear();
         for (const auto& e : entities) {
             if (e.isStaticTerrain || e.isCharacter) continue;
-            Vec3 halfSize = e.scale * 0.5f;
+
+            if (world) {
+                auto itMr = world->meshRenderers.find(e.id);
+                auto itTr = world->transforms.find(e.id);
+                if (itMr != world->meshRenderers.end() && itTr != world->transforms.end() &&
+                    itMr->second.mesh && !itMr->second.mesh->vertices.empty())
+                {
+                    const auto& mesh = itMr->second.mesh;
+                    Vec3 lmin = mesh->worldBounds.min;
+                    Vec3 lmax = mesh->worldBounds.max;
+                    if (lmax.x < lmin.x || (lmax - lmin).LengthSq() < 1e-12f) {
+                        lmin = Vec3(1e30f, 1e30f, 1e30f);
+                        lmax = Vec3(-1e30f, -1e30f, -1e30f);
+                        for (const auto& v : mesh->vertices) {
+                            lmin.x = std::min(lmin.x, v.position.x);
+                            lmin.y = std::min(lmin.y, v.position.y);
+                            lmin.z = std::min(lmin.z, v.position.z);
+                            lmax.x = std::max(lmax.x, v.position.x);
+                            lmax.y = std::max(lmax.y, v.position.y);
+                            lmax.z = std::max(lmax.z, v.position.z);
+                        }
+                    }
+
+                    Mat4 wm = itTr->second.GetWorldMatrix();
+                    Vec3 wmin(1e30f, 1e30f, 1e30f);
+                    Vec3 wmax(-1e30f, -1e30f, -1e30f);
+                    for (int c = 0; c < 8; ++c) {
+                        Vec3 corner(
+                            (c & 1) ? lmax.x : lmin.x,
+                            (c & 2) ? lmax.y : lmin.y,
+                            (c & 4) ? lmax.z : lmin.z);
+                        Vec3 wc = wm.TransformPoint(corner);
+                        wmin.x = std::min(wmin.x, wc.x);
+                        wmin.y = std::min(wmin.y, wc.y);
+                        wmin.z = std::min(wmin.z, wc.z);
+                        wmax.x = std::max(wmax.x, wc.x);
+                        wmax.y = std::max(wmax.y, wc.y);
+                        wmax.z = std::max(wmax.z, wc.z);
+                    }
+                    Vec3 center = (wmin + wmax) * 0.5f;
+                    Vec3 halfSize = (wmax - wmin) * 0.5f;
+                    halfSize.x = std::max(halfSize.x, 0.01f);
+                    halfSize.y = std::max(halfSize.y, 0.01f);
+                    halfSize.z = std::max(halfSize.z, 0.01f);
+                    obstacles.emplace_back(center, halfSize, e.name, e.color);
+                    continue;
+                }
+            }
+
+            float cy = std::fabs(std::cos(e.yaw));
+            float sy = std::fabs(std::sin(e.yaw));
+            Vec3 halfSize(
+                std::max(0.01f, (cy * e.scale.x + sy * e.scale.z) * 0.5f),
+                std::max(0.01f, e.scale.y * 0.5f),
+                std::max(0.01f, (sy * e.scale.x + cy * e.scale.z) * 0.5f)
+            );
             Vec3 center = e.position;
-            // For models whose base sits on the ground / placement plane, the center is offset up by halfSize.y
-            if (e.name.find("Platform") == std::string::npos) {
+            if (e.name.find("Platform") == std::string::npos && e.presetType != ModelPresetType::CRATE) {
                 center.y = e.position.y + halfSize.y;
             }
             obstacles.emplace_back(center, halfSize, e.name, e.color);
