@@ -10,6 +10,8 @@
 #include "surreal_engine.hpp"
 #include "surreal_animation.hpp"   // provides the stb_image implementation
 #include "surreal_image3d.hpp"
+#include "surreal_editor.hpp"
+#include <filesystem>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -70,22 +72,37 @@ static bool WritePNG(const std::string& path, const std::vector<uint8_t>& rgb, i
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cout << "Usage: " << argv[0] << " <image.png|jpg> [out_prefix] [maxRes]\n";
+        std::cout << "Usage: " << argv[0] << " <image.png|jpg> [out_prefix] [maxRes] [--relief] [--rig] [--time=SEC]\n";
         return 1;
     }
     std::string imgPath = argv[1];
-    std::string prefix = argc > 2 ? argv[2] : "photo3d_preview";
+    std::string prefix = "photo3d_preview";
     Surreal::Image3DOptions opt;
-    if (argc > 3) opt.maxRes = std::max(40, std::atoi(argv[3]));
+    float animTime = -1.0f;
+    int posArg = 0;
+    for (int i = 2; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--relief") { opt.mode = 1; continue; }
+        if (a == "--rig") { opt.mode = 2; continue; }
+        if (a.rfind("--time=", 0) == 0) { animTime = std::stof(a.substr(7)); continue; }
+        if (posArg == 0) { prefix = a; posArg++; }
+        else if (posArg == 1) { opt.maxRes = std::max(40, std::atoi(a.c_str())); posArg++; }
+    }
 
-    Surreal::Image3DInfo info;
-    auto mesh = Surreal::SurrealImage3D::BuildFromFile(imgPath, opt, &info);
-    if (!mesh) {
-        std::cerr << "[-] " << info.error << "\n";
+    std::shared_ptr<Surreal::SurrealMesh> mesh;
+    std::shared_ptr<Surreal::SkeletalMeshInstance> skel;
+    std::string infoMsg;
+    if (!Surreal::SurrealEditor::BuildPhotoPlacementAsset(
+            imgPath, Surreal::SurrealEditor::GetCleanName(std::filesystem::path(imgPath).filename().string()),
+            opt, 0, mesh, skel, &infoMsg) || !mesh) {
+        std::cerr << "[-] " << (infoMsg.empty() ? "Photo-to-3D failed" : infoMsg) << "\n";
         return 2;
     }
-    std::cout << "[OK] Grid " << info.gridW << "x" << info.gridH << " | Objekt-Zellen: " << info.maskCells
-              << " | " << (info.usedAlpha ? "Alpha-Freisteller" : (info.plateMode ? "Platte (kein Hintergrund erkannt)" : "Hintergrund entfernt"))
+    if (skel && animTime >= 0.0f) {
+        skel->Update(animTime, false);
+        mesh->CalculateBounds();
+    }
+    std::cout << "[OK] Mode: " << infoMsg
               << " | Verts: " << mesh->vertices.size() << " Tris: " << mesh->indices.size() / 3 << "\n";
     Surreal::Vec3 bmin = mesh->worldBounds.min, bmax = mesh->worldBounds.max;
     std::cout << "     Masse (m): B=" << (bmax.x - bmin.x) << " H=" << (bmax.y - bmin.y) << " T=" << (bmax.z - bmin.z) << "\n";
@@ -102,18 +119,18 @@ int main(int argc, char** argv) {
     mr.material.metallic = 0.05f;
     mr.material.roughness = 0.8f;
     engine.world.meshRenderers[e] = mr;
-    engine.world.ambientLight = Surreal::ColorRGB(0.35f, 0.35f, 0.38f);
+    engine.world.ambientLight = Surreal::ColorRGB(0.45f, 0.45f, 0.48f);
 
-    float height = bmax.y - bmin.y;
+    float height = std::max(0.5f, bmax.y - bmin.y);
     float dist = std::max(height * 1.9f, (bmax.x - bmin.x) * 2.2f);
-    Surreal::Vec3 target(0, height * 0.5f, 0);
+    Surreal::Vec3 target(0, bmin.y + height * 0.5f, 0);
     const char* names[3] = {"front", "side", "back"};
-    float yaws[3] = {0.0f, 0.95f, 3.14159f};
+    float yaws[3] = {0.0f, 1.570796f, 3.1415926f};
 
     for (int v = 0; v < 3; ++v) {
         float yaw = yaws[v];
         engine.cameraTarget = target;
-        engine.cameraPos = Surreal::Vec3(std::sin(yaw) * dist, height * 0.55f, std::cos(yaw) * dist);
+        engine.cameraPos = Surreal::Vec3(std::sin(yaw) * dist, bmin.y + height * 0.55f, std::cos(yaw) * dist);
         engine.cameraFov = 35.0f * 3.14159f / 180.0f;
         Surreal::Vec3 toCam = (engine.cameraPos - target).Normalized();
         engine.world.sunLight.direction = (toCam + Surreal::Vec3(0.25f, 0.7f, 0.0f)).Normalized();

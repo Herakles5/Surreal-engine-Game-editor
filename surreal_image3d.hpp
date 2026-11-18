@@ -44,7 +44,7 @@ struct Image3DOptions {
     float depth            = 0.45f; // half thickness relative to the inflate radius
     float relief           = 0.35f; // strength of luminance detail on the front
     float backBlend        = 0.0f;  // 0 = back uses authentic synthesized colors, 1 = flat average colour
-    float backDarken       = 0.90f; // brightness of the (guessed) back side
+    float backDarken       = 1.00f; // 1.0x matching cloth/hair brightness (PBR light handles 3D shading)
     int   mode             = 0;     // 0: Auto-Detect, 1: 100% Complete 3D Relief Plate, 2: Silhouette Cutout
     bool  generateBackside = true;  // 360° volumetric backside synthesis (hair, skull, spine, clothes)
     bool  anatomicalSmooth = true;  // Organic body volume without luminance spikes
@@ -372,10 +372,10 @@ public:
         for (int i = 0; i < N; ++i) {
             if (!fg[i]) continue;
             float r = R[i], g = G[i], b = B[i];
-            if (r > 50.0f && g > 35.0f && b > 20.0f && r > g && (r - g) >= 10.0f && (r - b) >= 15.0f) {
+            if (r > 80.0f && g > 50.0f && b > 35.0f && r > g && (r - g) >= 8.0f && (r - g) <= 78.0f && (r - b) >= 15.0f && g >= b - 8.0f) {
                 float sum = r + g + b + 1e-4f;
                 float nr = r / sum, ng = g / sum;
-                if (nr > 0.35f && nr < 0.60f && ng > 0.25f && ng < 0.40f) {
+                if (nr > 0.36f && nr < 0.53f && ng > 0.27f && ng < 0.39f) {
                     isSkin[i] = 1;
                 }
             }
@@ -692,53 +692,39 @@ public:
                     float dx = (x - xCenterLocal[i]) / localWidth[i];
                     dx = std::max(-1.0f, std::min(1.0f, dx));
 
-                    if (yLoc <= 0.28f) {
-                        // 1. Head / Crown / Occiput: 100% hair with natural strand wave & sheen (ZERO face/skin reflection)
-                        float wave = std::sin((x * 2.2f + y * 0.6f) * 1.5f);
-                        float strand = 0.95f + 0.05f * wave;
-                        backR[i] = std::max(0.0f, std::min(255.0f, hairR[x] * strand));
-                        backG[i] = std::max(0.0f, std::min(255.0f, hairG[x] * strand));
-                        backB[i] = std::max(0.0f, std::min(255.0f, hairB[x] * strand));
-                    } else if (yLoc <= 0.38f) {
-                        // 2. Neck / Hair cascade transition
-                        if (isSkin[i] || hairR[x] > 100.0f) {
-                            // Blonde/pink hair or skin: flow hair down the neck and upper back
-                            float strand = 0.93f + 0.07f * std::sin((x * 2.0f + y * 0.5f) * 1.5f);
+                    if (yLoc <= 0.24f) {
+                        // 1. Head / Crown / Occiput: replace face skin/eyes with clean crown hair while keeping hat/hair colors exact
+                        if (isSkin[i] || yLoc > 0.07f) {
+                            float wave = std::sin((x * 2.2f + y * 0.6f) * 1.5f);
+                            float strand = 0.96f + 0.04f * wave;
                             backR[i] = std::max(0.0f, std::min(255.0f, hairR[x] * strand));
                             backG[i] = std::max(0.0f, std::min(255.0f, hairG[x] * strand));
                             backB[i] = std::max(0.0f, std::min(255.0f, hairB[x] * strand));
-                        } else if (isSkin[i]) {
-                            // Replace front neck/chest skin with jacket fabric below
-                            for (int dy = 1; dy <= 10; ++dy) {
+                        }
+                    } else if (yLoc <= 0.62f && isSkin[i]) {
+                        // Replace front neck/chest skin with adjacent shoulder/collar garment (scan horizontally first, then down)
+                        bool replaced = false;
+                        for (int dxStep = 1; dxStep <= 24 && !replaced; ++dxStep) {
+                            for (int dir : {-1, 1}) {
+                                int xx = x + dir * dxStep;
+                                if (xx >= 0 && xx < gw && fg[y * gw + xx] && !isSkin[y * gw + xx] && dEff[y * gw + xx] >= 2.0f) {
+                                    int j = y * gw + xx;
+                                    backR[i] = R[j]; backG[i] = G[j]; backB[i] = B[j];
+                                    replaced = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!replaced) {
+                            for (int dy = 1; dy <= 16; ++dy) {
                                 int yy = y + dy;
-                                if (yy < gh && fg[yy * gw + x] && !isSkin[yy * gw + x]) {
+                                if (yy < gh && fg[yy * gw + x] && !isSkin[yy * gw + x] && dEff[yy * gw + x] >= 2.0f) {
                                     int j = yy * gw + x;
                                     backR[i] = R[j]; backG[i] = G[j]; backB[i] = B[j];
                                     break;
                                 }
                             }
                         }
-                    } else if (yLoc <= 0.62f) {
-                        // 3. Torso / Waist / Jackets
-                        if (isSkin[i]) {
-                            for (int dy = 1; dy <= 10; ++dy) {
-                                int yy = y + dy;
-                                if (yy < gh && fg[yy * gw + x] && !isSkin[yy * gw + x]) {
-                                    int j = yy * gw + x;
-                                    backR[i] = R[j]; backG[i] = G[j]; backB[i] = B[j];
-                                    break;
-                                }
-                            }
-                        }
-                        // Sculpt realistic anatomical shading for jackets & back:
-                        // 1. Subtle spinal groove shadow
-                        float spineShade = 1.0f - 0.12f * std::exp(-(dx * dx) / 0.05f);
-                        // 2. Subtle scapular shoulder blade highlight
-                        float scapulaLight = 1.0f + 0.05f * std::exp(-((std::abs(dx) - 0.42f) * (std::abs(dx) - 0.42f)) / 0.08f);
-                        float backAO = spineShade * scapulaLight;
-                        backR[i] = std::max(0.0f, std::min(255.0f, backR[i] * backAO));
-                        backG[i] = std::max(0.0f, std::min(255.0f, backG[i] * backAO));
-                        backB[i] = std::max(0.0f, std::min(255.0f, backB[i] * backAO));
                     }
                 }
             }
@@ -831,8 +817,8 @@ public:
                 const uint8_t* sp = rgba + (static_cast<size_t>(srcY) * w + srcX) * 4;
 
                 float rf = R[i], gf = G[i], bf = B[i];
-                if (sp[3] > 140) {
-                    // Blend 75% direct high-res source pixel with 25% decontaminated grid color
+                if (sp[3] > 235 && (inf.plateMode || dEff[i] >= 2.5f)) {
+                    // Blend 75% direct high-res source pixel with 25% decontaminated grid color only cleanly inside interior
                     rf = 0.75f * sp[0] + 0.25f * R[i];
                     gf = 0.75f * sp[1] + 0.25f * G[i];
                     bf = 0.75f * sp[2] + 0.25f * B[i];
@@ -912,9 +898,10 @@ public:
         }
 
         size_t rimStartIndex = mesh->indices.size();
+        size_t rimVertexStart = mesh->vertices.size();
 
         // Watertight Perimeter / Rim side walls with DEDICATED rim vertices & true outward normals:
-        // Stitches front and back into a closed solid along ANY boundary, perfectly colored with ambient occlusion
+        // Stitches front and back into a closed solid along ANY boundary with clean seam UVs
         auto isQuadActive = [&](int qx, int qy) -> bool {
             if (qx < 0 || qy < 0 || qx + 1 >= gw || qy + 1 >= gh) return false;
             int qa = qy * gw + qx;
@@ -936,13 +923,12 @@ public:
             Vec3 pF2(px2, py2, zf[cell2] * s);
             Vec3 pB2(px2, py2, zb[cell2] * s);
 
-            // True decontaminated clothing / skin / hair color darkened by 0.85 for lateral body occlusion
-            float ao = 0.85f;
+            // Clean decontaminated clothing / skin / hair color on rims without cross-atlas UV streaking
             float bDark = opt.backDarken;
-            Vec4 cF1(R[cell1] / 255.0f * ao, G[cell1] / 255.0f * ao, B[cell1] / 255.0f * ao, 1.0f);
-            Vec4 cF2(R[cell2] / 255.0f * ao, G[cell2] / 255.0f * ao, B[cell2] / 255.0f * ao, 1.0f);
-            Vec4 cB1(backR[cell1] / 255.0f * ao * bDark, backG[cell1] / 255.0f * ao * bDark, backB[cell1] / 255.0f * ao * bDark, 1.0f);
-            Vec4 cB2(backR[cell2] / 255.0f * ao * bDark, backG[cell2] / 255.0f * ao * bDark, backB[cell2] / 255.0f * ao * bDark, 1.0f);
+            Vec4 cF1(R[cell1] / 255.0f, G[cell1] / 255.0f, B[cell1] / 255.0f, 1.0f);
+            Vec4 cF2(R[cell2] / 255.0f, G[cell2] / 255.0f, B[cell2] / 255.0f, 1.0f);
+            Vec4 cB1(backR[cell1] / 255.0f * bDark, backG[cell1] / 255.0f * bDark, backB[cell1] / 255.0f * bDark, 1.0f);
+            Vec4 cB2(backR[cell2] / 255.0f * bDark, backG[cell2] / 255.0f * bDark, backB[cell2] / 255.0f * bDark, 1.0f);
 
             float u1Norm = (x1 + 0.5f) / gw, v1Norm = (y1 + 0.5f) / gh;
             float u2Norm = (x2 + 0.5f) / gw, v2Norm = (y2 + 0.5f) / gh;
@@ -952,9 +938,9 @@ public:
             uint32_t vF2 = static_cast<uint32_t>(mesh->vertices.size());
             mesh->vertices.push_back(Vertex3D(pF2, nOut, 0.5f * u2Norm, v2Norm, cF2));
             uint32_t vB2 = static_cast<uint32_t>(mesh->vertices.size());
-            mesh->vertices.push_back(Vertex3D(pB2, nOut, 0.5f + 0.5f * u2Norm, v2Norm, cB2));
+            mesh->vertices.push_back(Vertex3D(pB2, nOut, 0.5f * u2Norm, v2Norm, cB2));
             uint32_t vB1 = static_cast<uint32_t>(mesh->vertices.size());
-            mesh->vertices.push_back(Vertex3D(pB1, nOut, 0.5f + 0.5f * u1Norm, v1Norm, cB1));
+            mesh->vertices.push_back(Vertex3D(pB1, nOut, 0.5f * u1Norm, v1Norm, cB1));
 
             // True outward CCW winding:
             // Triangle 1: vF1 -> vF2 -> vB2
@@ -1036,7 +1022,7 @@ public:
             rimAccum[i1] = rimAccum[i1] + fn;
             rimAccum[i2] = rimAccum[i2] + fn;
         }
-        for (size_t v = rimStartIndex; v < mesh->vertices.size(); ++v) {
+        for (size_t v = rimVertexStart; v < mesh->vertices.size(); ++v) {
             if (rimAccum[v].LengthSq() > 1e-6f) {
                 Vec3 n = rimAccum[v].Normalized();
                 n.z = 0.0f; // Pure planar radial in XY plane: eliminates specular glints

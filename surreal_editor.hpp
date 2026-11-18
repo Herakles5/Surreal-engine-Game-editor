@@ -135,6 +135,58 @@ public:
         onMeshEvicted(mesh);
     }
 
+    /**
+     * Unified photo loader for Catalog [L], Image Picker [F3], Level Load [F7],
+     * and CLI --photo: dresses cut-out characters over a proportionally adapted
+     * 3D skeleton, falling back to a relief plate for non-character photos.
+     */
+    static bool BuildPhotoPlacementAsset(
+        const std::string& fullPath,
+        const std::string& cleanName,
+        const Image3DOptions& opt,
+        size_t animSeed,
+        std::shared_ptr<SurrealMesh>& outMesh,
+        std::shared_ptr<SkeletalMeshInstance>& outSkel,
+        std::string* outInfoMsg = nullptr)
+    {
+        outMesh.reset();
+        outSkel.reset();
+
+        bool tryCostume = (opt.mode != 1);
+        if (tryCostume && opt.mode != 2) {
+            int iw = 0, ih = 0, ich = 0;
+            unsigned char* rgba = stbi_load(fullPath.c_str(), &iw, &ih, &ich, 4);
+            if (rgba && iw > 0 && ih > 0) {
+                tryCostume = SurrealAutoRigger::ShouldBuildAsCostumedCharacter(rgba, iw, ih);
+            }
+            if (rgba) stbi_image_free(rgba);
+        }
+
+        if (tryCostume) {
+            auto fig = SurrealAutoRigger::BuildSingleRubberSuitCharacter(fullPath, cleanName, opt, animSeed);
+            if (fig.mesh && !fig.mesh->vertices.empty()) {
+                outMesh = fig.mesh;
+                outSkel = fig.skeletal;
+                if (outInfoMsg) {
+                    size_t nJoints = outSkel ? outSkel->joints.size() : 0;
+                    *outInfoMsg = "3D Kostuem-Rigg (" + std::to_string(nJoints) + " Bones)";
+                }
+                return true;
+            }
+        }
+
+        Image3DInfo info;
+        outMesh = SurrealImage3D::BuildFromFile(fullPath, opt, &info);
+        if (outMesh && !outMesh->vertices.empty()) {
+            if (outInfoMsg) {
+                *outInfoMsg = info.plateMode ? "Plate: Solid Relief" : "Cutout Model";
+            }
+            return true;
+        }
+        if (outInfoMsg) *outInfoMsg = info.error;
+        return false;
+    }
+
     EditorSnapshot CaptureSnapshot(const SurrealWorld& world, const std::string& label = "") const {
         EditorSnapshot snap;
         snap.selectedIndex = selectedIndex;
@@ -406,7 +458,9 @@ public:
                 lower.find("monk") != std::string::npos ||
                 lower.find("dragon") != std::string::npos ||
                 lower.find("swimsuit") != std::string::npos ||
-                lower.find("solar") != std::string::npos);
+                lower.find("solar") != std::string::npos ||
+                lower.find("studio") != std::string::npos ||
+                lower.find("rigged") != std::string::npos);
     }
 
     static bool IsAvatarModel(const std::string& name) {
@@ -627,13 +681,14 @@ public:
         bool isPhoto = IsImageFile(file);
         if (isPhoto) {
             Image3DOptions opt;
-            Image3DInfo info;
-            placementMesh = SurrealImage3D::BuildFromFile(file.fullPath, opt, &info);
-            loaded = (placementMesh != nullptr);
+            std::string infoMsg;
+            loaded = BuildPhotoPlacementAsset(
+                file.fullPath, GetCleanName(file.filename), opt, entities.size(),
+                placementMesh, placementSkeletal, &infoMsg);
             placementMetallic = 0.05f;   // matte, so the picture colours stay faithful
             placementRoughness = 0.85f;
             if (!loaded) {
-                SetStatus("[-] Photo->3D: " + info.error, 5.0f);
+                SetStatus("[-] Photo->3D: " + infoMsg, 5.0f);
                 return;
             }
         } else if (file.extension == ".obj") {
@@ -673,13 +728,14 @@ public:
                 scaleFactor = 1.0f; // Photo->3D meshes are already built at ~1.8 m
             } else if (isEnvironment) {
                 scaleFactor = 1.0f; // Keep real-world 1:1 scale for cities & environments!
-            } else if (IsDanceModel(file.filename) || IsAvatarModel(file.filename)) {
+            } else if (placementSkeletal || IsDanceModel(file.filename) || IsAvatarModel(file.filename)) {
                 // Humanoid / creature characters: normalize height to ~1.45m tall (or ~2.40m for dragon)
                 float charHeight = placementMesh->worldBounds.max.y - placementMesh->worldBounds.min.y;
                 float targetH = 1.45f;
                 std::string lowerFn = file.filename;
                 for (char& c : lowerFn) c = tolower(c);
                 if (lowerFn.find("dragon") != std::string::npos) targetH = 2.40f;
+                else if (lowerFn.find("studio") != std::string::npos || lowerFn.find("rigged") != std::string::npos) targetH = 1.68f;
                 if (charHeight > 0.0001f) {
                     scaleFactor = targetH / charHeight;
                 } else {
@@ -721,20 +777,13 @@ public:
         bool loaded = false;
         bool isPhoto = IsImageFile(file);
         if (isPhoto) {
-            auto rubberFig = SurrealAutoRigger::BuildSingleRubberSuitCharacter(
-                file.fullPath, GetCleanName(file.filename), userOpt, entities.size());
-            if (rubberFig.mesh && !rubberFig.mesh->vertices.empty()) {
-                placementMesh = rubberFig.mesh;
-                placementSkeletal = rubberFig.skeletal;
-                loaded = true;
-            } else {
-                Image3DInfo info;
-                placementMesh = SurrealImage3D::BuildFromFile(file.fullPath, userOpt, &info);
-                loaded = (placementMesh != nullptr);
-                if (!loaded) {
-                    SetStatus("[-] Photo->3D: " + info.error, 5.0f);
-                    return false;
-                }
+            std::string infoMsg;
+            loaded = BuildPhotoPlacementAsset(
+                file.fullPath, GetCleanName(file.filename), userOpt, entities.size(),
+                placementMesh, placementSkeletal, &infoMsg);
+            if (!loaded) {
+                SetStatus("[-] Photo->3D: " + infoMsg, 5.0f);
+                return false;
             }
             placementMetallic = 0.05f;
             placementRoughness = 0.85f;
@@ -774,12 +823,15 @@ public:
                 scaleFactor = 1.0f;
             } else if (isEnvironment) {
                 scaleFactor = 1.0f;
-            } else if (IsDanceModel(file.filename) || IsAvatarModel(file.filename)) {
+            } else if (placementSkeletal || IsDanceModel(file.filename) || IsAvatarModel(file.filename)) {
                 float charHeight = placementMesh->worldBounds.max.y - placementMesh->worldBounds.min.y;
                 float targetH = 1.45f;
                 std::string lowerFn = file.filename;
                 for (char& c : lowerFn) c = tolower(c);
                 if (lowerFn.find("dragon") != std::string::npos) targetH = 2.40f;
+                else if (lowerFn.find("studio") != std::string::npos || lowerFn.find("rigged") != std::string::npos) {
+                    targetH = std::clamp(userOpt.heightMeters, 0.8f, 4.0f);
+                }
                 if (charHeight > 0.0001f) {
                     scaleFactor = targetH / charHeight;
                 } else {
@@ -1772,7 +1824,9 @@ public:
                     } else if (lowerExt == ".png" || lowerExt == ".jpg" || lowerExt == ".jpeg" ||
                                lowerExt == ".bmp" || lowerExt == ".webp" || lowerExt == ".tga") {
                         Image3DOptions opt;
-                        loadedMesh = SurrealImage3D::BuildFromFile(resolved, opt, nullptr);
+                        BuildPhotoPlacementAsset(
+                            resolved, GetCleanName(std::filesystem::path(resolved).filename().string()),
+                            opt, entities.size(), loadedMesh, loadedSkeletal);
                     } else {
                         SurrealModelLoader::LoadCustomFile(resolved, loadedMesh, col);
                     }
@@ -1943,68 +1997,81 @@ public:
         TopBarButton bPhoto;
         bPhoto.id = "photo_3d";
         bPhoto.label = "+ Image->3D [F3]";
-        bPhoto.x = curX; bPhoto.y = btnY; bPhoto.w = 144; bPhoto.h = btnH;
+        bPhoto.x = curX; bPhoto.y = btnY; bPhoto.w = 132; bPhoto.h = btnH;
         bPhoto.borderColor = 0xFF00FFCC; // Cyan
         bPhoto.textColor = 0xFF00FFCC;
         bPhoto.bgColor = 0x0A1828;
         topButtons.push_back(bPhoto);
-        curX += bPhoto.w + 8;
+        curX += bPhoto.w + 6;
 
         // 2. [ 💃 Rig 3D Group ] Button
         TopBarButton bRig;
         bRig.id = "rig_group";
         bRig.label = "Rig Group [F4]";
-        bRig.x = curX; bRig.y = btnY; bRig.w = 130; bRig.h = btnH;
+        bRig.x = curX; bRig.y = btnY; bRig.w = 120; bRig.h = btnH;
         bRig.borderColor = 0xFFBF00FF; // Neon Violet
         bRig.textColor = 0xFFBF00FF;
         bRig.bgColor = 0x1A0828;
         topButtons.push_back(bRig);
-        curX += bRig.w + 8;
+        curX += bRig.w + 6;
 
         // 3. [ ⚙️ Settings ] Button
         TopBarButton bSettings;
         bSettings.id = "settings";
         bSettings.label = "Settings [F2]";
-        bSettings.x = curX; bSettings.y = btnY; bSettings.w = 126; bSettings.h = btnH;
+        bSettings.x = curX; bSettings.y = btnY; bSettings.w = 116; bSettings.h = btnH;
         bSettings.borderColor = 0xFFFF007F; // Magenta
         bSettings.textColor = 0xFFFF007F;
         bSettings.bgColor = 0x1A0D22;
         topButtons.push_back(bSettings);
-        curX += bSettings.w + 8;
+        curX += bSettings.w + 6;
 
         // 4. [ 📁 3D Catalog ] Button
         TopBarButton bCat;
         bCat.id = "catalog";
         bCat.label = "Catalog [L]";
-        bCat.x = curX; bCat.y = btnY; bCat.w = 112; bCat.h = btnH;
+        bCat.x = curX; bCat.y = btnY; bCat.w = 102; bCat.h = btnH;
         bCat.borderColor = 0xFFFFCC00; // Amber
         bCat.textColor = 0xFFFFCC00;
         bCat.bgColor = 0x1C1808;
         topButtons.push_back(bCat);
-        curX += bCat.w + 8;
+        curX += bCat.w + 6;
 
         if (screenW >= 1020) {
-            // 4. [ 💾 Save ] Button
+            // 5. [ 💾 Save ] Button
             TopBarButton bSave;
             bSave.id = "save";
             bSave.label = "Save [F6]";
-            bSave.x = curX; bSave.y = btnY; bSave.w = 96; bSave.h = btnH;
+            bSave.x = curX; bSave.y = btnY; bSave.w = 82; bSave.h = btnH;
             bSave.borderColor = 0xFF00FF88; // Neon Green
             bSave.textColor = 0xFF00FF88;
             bSave.bgColor = 0x0A2016;
             topButtons.push_back(bSave);
-            curX += bSave.w + 8;
+            curX += bSave.w + 6;
 
-            // 5. [ 📂 Load ] Button
+            // 6. [ 📂 Load ] Button
             TopBarButton bLoad;
             bLoad.id = "load";
             bLoad.label = "Load [F7]";
-            bLoad.x = curX; bLoad.y = btnY; bLoad.w = 96; bLoad.h = btnH;
+            bLoad.x = curX; bLoad.y = btnY; bLoad.w = 82; bLoad.h = btnH;
             bLoad.borderColor = 0xFF00E5FF; // Sky Blue
             bLoad.textColor = 0xFF00E5FF;
             bLoad.bgColor = 0x081C28;
             topButtons.push_back(bLoad);
-            curX += bLoad.w + 8;
+            curX += bLoad.w + 6;
+        }
+
+        if (curX + 116 < screenW - 275) {
+            // 7. [ 🐱 Smash Cats 3D ] Game Launcher
+            TopBarButton bSmash;
+            bSmash.id = "smash_cats";
+            bSmash.label = "Smash Cats[F8]";
+            bSmash.x = curX; bSmash.y = btnY; bSmash.w = 116; bSmash.h = btnH;
+            bSmash.borderColor = 0xFFFF9922; // Arcade Orange-Gold
+            bSmash.textColor = 0xFFFF9922;
+            bSmash.bgColor = 0x241408;
+            topButtons.push_back(bSmash);
+            curX += bSmash.w + 6;
         }
 
         // Render Bare-Metal Buttons

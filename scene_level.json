@@ -135,7 +135,7 @@
     },
     {
       "id": 14,
-      "name": "MEOVV_1_Ella",
+      "name": "MEOVV_1_Gawon",
       "type": "AVATAR",
       "position": [-2.24, 0, 3.98],
       "scale": [0.531441, 0.531441, 0.531441],
@@ -145,7 +145,7 @@
     },
     {
       "id": 15,
-      "name": "MEOVV_2_Gawon",
+      "name": "MEOVV_2_Anna",
       "type": "AVATAR",
       "position": [-1.12, 0, 4.42],
       "scale": [0.531441, 0.531441, 0.531441],
@@ -155,7 +155,7 @@
     },
     {
       "id": 16,
-      "name": "MEOVV_3_Sooin",
+      "name": "MEOVV_3_Ella",
       "type": "AVATAR",
       "position": [0, 0, 3.98],
       "scale": [0.478297, 0.478297, 0.478297],
@@ -165,7 +165,7 @@
     },
     {
       "id": 17,
-      "name": "MEOVV_4_Anna",
+      "name": "MEOVV_4_Narin",
       "type": "AVATAR",
       "position": [1.12, 0, 4.42],
       "scale": [0.478297, 0.478297, 0.478297],
@@ -175,7 +175,7 @@
     },
     {
       "id": 18,
-      "name": "MEOVV_5_Narin",
+      "name": "MEOVV_5_Sooin",
       "type": "AVATAR",
       "position": [2.24, 0, 3.98],
       "scale": [0.421901, 0.421901, 0.421901],

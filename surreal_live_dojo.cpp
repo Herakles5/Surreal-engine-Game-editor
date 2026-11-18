@@ -18,6 +18,7 @@
 #include "surreal_game_master.hpp"
 #include "surreal_paths.hpp"
 #include <iostream>
+#include <algorithm>
 #include <vector>
 #include <chrono>
 #include <thread>
@@ -31,10 +32,142 @@
 
 // --- NATIVE LINUX POPUP STATE & IPC ---
 static std::atomic<bool> g_imagePickerRunning(false);
+
+static void DrawRoleBasedSkeletonOverlay(
+    uint32_t* fb, int winW, int winH,
+    const Surreal::SkeletalMeshInstance& skel,
+    const std::vector<bool>& onScreen,
+    const std::vector<int>& screenX,
+    const std::vector<int>& screenY)
+{
+    auto drawBoneLine = [&](int jA, int jB, uint32_t col) {
+        if (jA >= 0 && jB >= 0 &&
+            jA < static_cast<int>(skel.joints.size()) &&
+            jB < static_cast<int>(skel.joints.size()) &&
+            onScreen[jA] && onScreen[jB]) {
+            Surreal::SurrealHUD::DrawLine(fb, winW, winH, screenX[jA], screenY[jA], screenX[jB], screenY[jB], col);
+            Surreal::SurrealHUD::DrawLine(fb, winW, winH, screenX[jA] + 1, screenY[jA], screenX[jB] + 1, screenY[jB], col);
+        }
+    };
+
+    auto roleIdx = [&](Surreal::HumanoidBoneRole r) -> int {
+        return Surreal::SurrealAutoRigger::FindJointByRole(skel, r);
+    };
+
+    auto drawChain = [&](std::initializer_list<int> joints, uint32_t col) {
+        int prev = -1;
+        for (int idx : joints) {
+            if (idx < 0 || idx == prev) continue;
+            if (prev >= 0) drawBoneLine(prev, idx, col);
+            prev = idx;
+        }
+    };
+
+    const int hips = roleIdx(Surreal::HumanoidBoneRole::HIPS);
+    const int spine = roleIdx(Surreal::HumanoidBoneRole::SPINE);
+    const int spine1 = roleIdx(Surreal::HumanoidBoneRole::SPINE1);
+    const int spine2 = roleIdx(Surreal::HumanoidBoneRole::SPINE2);
+    const int neck = roleIdx(Surreal::HumanoidBoneRole::NECK);
+    const int head = roleIdx(Surreal::HumanoidBoneRole::HEAD);
+    const int chestAnchor = (spine2 >= 0) ? spine2 : ((spine1 >= 0) ? spine1 : ((spine >= 0) ? spine : hips));
+
+    const int shL = roleIdx(Surreal::HumanoidBoneRole::L_SHOULDER);
+    const int armL = roleIdx(Surreal::HumanoidBoneRole::L_ARM);
+    const int fArmL = roleIdx(Surreal::HumanoidBoneRole::L_FOREARM);
+    const int handL = roleIdx(Surreal::HumanoidBoneRole::L_HAND);
+
+    const int shR = roleIdx(Surreal::HumanoidBoneRole::R_SHOULDER);
+    const int armR = roleIdx(Surreal::HumanoidBoneRole::R_ARM);
+    const int fArmR = roleIdx(Surreal::HumanoidBoneRole::R_FOREARM);
+    const int handR = roleIdx(Surreal::HumanoidBoneRole::R_HAND);
+
+    const int uLegL = roleIdx(Surreal::HumanoidBoneRole::L_UPLEG);
+    const int legL = roleIdx(Surreal::HumanoidBoneRole::L_LEG);
+    const int footL = roleIdx(Surreal::HumanoidBoneRole::L_FOOT);
+    const int toeL = roleIdx(Surreal::HumanoidBoneRole::L_TOE);
+
+    const int uLegR = roleIdx(Surreal::HumanoidBoneRole::R_UPLEG);
+    const int legR = roleIdx(Surreal::HumanoidBoneRole::R_LEG);
+    const int footR = roleIdx(Surreal::HumanoidBoneRole::R_FOOT);
+    const int toeR = roleIdx(Surreal::HumanoidBoneRole::R_TOE);
+
+    drawChain({hips, spine, spine1, spine2, neck, head}, 0xFF00FFCC);
+    drawChain({chestAnchor, shL, armL, fArmL, handL}, 0xFF00FFCC);
+    drawChain({chestAnchor, shR, armR, fArmR, handR}, 0xFF00FFCC);
+    drawChain({hips, uLegL, legL, footL, toeL}, 0xFF00FFCC);
+    drawChain({hips, uLegR, legR, footR, toeR}, 0xFF00FFCC);
+    drawBoneLine((shL >= 0) ? shL : armL, (shR >= 0) ? shR : armR, 0xFF00FFCC);
+    drawBoneLine(uLegL, uLegR, 0xFF00FFCC);
+
+    auto drawNode = [&](int idx, int r, uint32_t col) {
+        if (idx >= 0 && idx < static_cast<int>(onScreen.size()) && onScreen[idx]) {
+            Surreal::SurrealHUD::DrawCircle(fb, winW, winH, screenX[idx], screenY[idx], r, col);
+        }
+    };
+    drawNode(hips, 4, 0xFFFFBB00);
+    drawNode(spine, 3, 0xFFFFCC00);
+    drawNode(spine1, 3, 0xFFFFCC00);
+    drawNode(spine2, 3, 0xFFFFEE33);
+    drawNode(neck, 3, 0xFFFFEE33);
+    drawNode(head, 4, 0xFFFFDD00);
+    drawNode(shL, 3, 0xFFFFEE33);
+    drawNode(shR, 3, 0xFFFFEE33);
+    drawNode(armL, 3, 0xFFFFCC00);
+    drawNode(fArmL, 3, 0xFFFFCC00);
+    drawNode(handL, 3, 0xFF55FFFF);
+    drawNode(armR, 3, 0xFFFFCC00);
+    drawNode(fArmR, 3, 0xFFFFCC00);
+    drawNode(handR, 3, 0xFF55FFFF);
+    drawNode(uLegL, 3, 0xFFFFCC00);
+    drawNode(legL, 3, 0xFFFFCC00);
+    drawNode(footL, 3, 0xFF66FF88);
+    drawNode(uLegR, 3, 0xFFFFCC00);
+    drawNode(legR, 3, 0xFFFFCC00);
+    drawNode(footR, 3, 0xFF66FF88);
+}
 static std::atomic<bool> g_settingsGuiRunning(false);
+static std::atomic<bool> g_smashCatsRunning(false);
 static std::mutex g_imagePathMutex;
 static std::string g_pendingImagePath = "";
+static std::atomic<bool> g_studioAutoSpawnPending{false};
+static std::string g_lastStudioStatusMsg = "";
 static time_t g_lastSettingsMTime = 0;
+
+static std::string ExtractJsonString(const std::string& json, const std::string& key) {
+    size_t pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return "";
+    size_t colon = json.find(':', pos);
+    if (colon == std::string::npos) return "";
+    size_t q1 = json.find('"', colon);
+    if (q1 == std::string::npos) return "";
+    std::string out;
+    for (size_t i = q1 + 1; i < json.size(); ++i) {
+        if (json[i] == '\\' && i + 1 < json.size()) {
+            out.push_back(json[++i]);
+        } else if (json[i] == '"') {
+            return out;
+        } else {
+            out.push_back(json[i]);
+        }
+    }
+    return "";
+}
+
+static float ExtractJsonFloat(const std::string& json, const std::string& key, float defVal) {
+    size_t pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return defVal;
+    size_t colon = json.find(':', pos);
+    if (colon == std::string::npos) return defVal;
+    try { return std::stof(json.substr(colon + 1)); } catch (...) { return defVal; }
+}
+
+static int ExtractJsonInt(const std::string& json, const std::string& key, int defVal) {
+    size_t pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return defVal;
+    size_t colon = json.find(':', pos);
+    if (colon == std::string::npos) return defVal;
+    try { return std::stoi(json.substr(colon + 1)); } catch (...) { return defVal; }
+}
 
 static void TriggerNativeImagePicker() {
     if (g_imagePickerRunning.load()) {
@@ -44,8 +177,8 @@ static void TriggerNativeImagePicker() {
     g_imagePickerRunning.store(true);
     std::thread([]() {
         const char* cmd = "GTK_A11Y=none zenity --file-selection --modal "
-                          "--title=\"📸 AION Surreal 3D - Select Image for 3D Model\" "
-                          "--file-filter=\"Images (*.png *.jpg *.jpeg *.bmp) | *.png *.jpg *.jpeg *.bmp *.PNG *.JPG *.JPEG *.BMP\" "
+                          "--title=\"✨ AION Surreal 3D - Select Image or 3D Mesh (.glb/.obj)\" "
+                          "--file-filter=\"Images & 3D Meshes (*.png *.jpg *.jpeg *.webp *.glb *.gltf *.obj) | *.png *.PNG *.jpg *.JPG *.jpeg *.JPEG *.bmp *.webp *.glb *.GLB *.gltf *.obj *.OBJ *.fbx\" "
                           "--file-filter=\"All Files | *\" "
                           "2>/dev/null";
         FILE* fp = popen(cmd, "r");
@@ -94,6 +227,34 @@ static void TriggerNativeSettingsDialog() {
             (void)ret;
         }
         g_settingsGuiRunning.store(false);
+    }).detach();
+}
+
+static void LaunchSmashCatsExternal(Surreal::SurrealEditor& editor) {
+    if (g_smashCatsRunning.load()) {
+        editor.SetStatus("[*] Smash Cats 3D: Surreal Edition is already running!", 3.0f);
+        return;
+    }
+    std::error_code ec;
+    std::string binPath = (surreal::paths::GetExecutableDir() / "surreal-smash-cats").string();
+    if (!std::filesystem::exists(binPath, ec)) {
+        if (std::filesystem::exists("/usr/local/bin/smash-cats", ec)) {
+            binPath = "/usr/local/bin/smash-cats";
+        } else if (std::filesystem::exists("/root/coding/MeinOS/run_smash_cats.sh", ec)) {
+            binPath = "/root/coding/MeinOS/run_smash_cats.sh";
+        } else {
+            editor.SetStatus("[!] surreal-smash-cats binary not found (run make surreal-smash-cats)", 4.0f);
+            return;
+        }
+    }
+    g_smashCatsRunning.store(true);
+    editor.SetStatus("[>] Launching Smash Cats 3D: Surreal Edition...", 3.5f);
+    std::thread([binPath]() {
+        std::string displayPfx = surreal::paths::HasDisplayEnv() ? "" : "DISPLAY=:0 ";
+        std::string cmd = displayPfx + surreal::paths::ShellEscapeSingle(binPath) + " >/dev/null 2>&1";
+        int ret = system(cmd.c_str());
+        (void)ret;
+        g_smashCatsRunning.store(false);
     }).detach();
 }
 
@@ -376,6 +537,7 @@ int main(int argc, char* argv[]) {
     bool loadParkour = false;
     std::string requestedAvatar = "";
     std::string photoPath = "";   // --photo <image>: build a coloured 3D model from a picture
+    std::string studio3dPath = ""; // --studio3d <image|mesh>: async Studio AI 3D + Blender auto-rig
     std::string rigGroupPath = ""; // --rig-group <image>: segment & auto-rig 3D multi-figure photo
     bool showSkeletonDebug = false;
     for (int i = 1; i < argc; ++i) {
@@ -387,6 +549,8 @@ int main(int argc, char* argv[]) {
         if (arg == "--parkour") loadParkour = true;
         if (arg == "--photo" && i + 1 < argc) photoPath = argv[++i];
         else if (arg.rfind("--photo=", 0) == 0) photoPath = arg.substr(8);
+        if (arg == "--studio3d" && i + 1 < argc) studio3dPath = argv[++i];
+        else if (arg.rfind("--studio3d=", 0) == 0) studio3dPath = arg.substr(11);
         if ((arg == "--rig-group" || arg == "--segment-group") && i + 1 < argc) rigGroupPath = argv[++i];
         else if (arg.rfind("--rig-group=", 0) == 0) rigGroupPath = arg.substr(12);
         if (arg == "--avatar" && i + 1 < argc) requestedAvatar = argv[++i];
@@ -670,10 +834,15 @@ int main(int argc, char* argv[]) {
 
     // Optional Photo-to-3D model (via --photo <image.png|jpg>), placed next to the avatar
     if (!photoPath.empty()) {
-        Surreal::Image3DInfo p3dInfo;
-        auto photoMesh = Surreal::SurrealImage3D::BuildFromFile(photoPath, Surreal::Image3DOptions(), &p3dInfo);
-        if (photoMesh) {
-            std::string photoName = Surreal::SurrealEditor::GetCleanName(std::filesystem::path(photoPath).filename().string()) + "_3D";
+        std::shared_ptr<Surreal::SurrealMesh> photoMesh;
+        std::shared_ptr<Surreal::SkeletalMeshInstance> photoSkel;
+        std::string photoInfo;
+        std::string photoBase = Surreal::SurrealEditor::GetCleanName(
+            std::filesystem::path(photoPath).filename().string());
+        std::string photoName = photoBase + "_3D";
+        if (Surreal::SurrealEditor::BuildPhotoPlacementAsset(
+                photoPath, photoBase, Surreal::Image3DOptions(), editor.entities.size(),
+                photoMesh, photoSkel, &photoInfo)) {
             Surreal::EntityID pe = engine.world.CreateEntity(photoName);
             Surreal::TransformComponent& pt = engine.world.transforms[pe];
             pt.position = Surreal::Vec3(1.6f, 0.0f, 0.0f);
@@ -693,16 +862,40 @@ int main(int argc, char* argv[]) {
             ped.color = pmr.material.albedo;
             ped.metallic = pmr.material.metallic;
             ped.roughness = pmr.material.roughness;
+            ped.assetPath = photoPath;
             editor.entities.push_back(ped);
+            if (photoSkel) {
+                editor.animatedEntities[pe] = photoSkel;
+            }
             std::cout << "[✓] Photo-to-3D: " << photoName << " (" << photoMesh->vertices.size() << " Verts, "
-                      << photoMesh->indices.size() / 3 << " Tris)"
-                      << (p3dInfo.plateMode ? " [Plate: Solid Relief]" : " [Cutout Model]") << "\n";
+                      << photoMesh->indices.size() / 3 << " Tris) [" << photoInfo << "]\n";
         } else {
-            std::cerr << "[-] Photo-to-3D failed: " << p3dInfo.error << "\n";
+            std::cerr << "[-] Photo-to-3D failed: " << photoInfo << "\n";
         }
     }
 
-    // Always auto-spawn the 5 MEOVV Adaptive 3D Rubber-Suit figures (Ella, Gawon, Sooin, Anna, Narin)
+    // Optional Studio AI 3D + Local Blender Auto-Rig pipeline (--studio3d <image.png|.glb>)
+    if (!studio3dPath.empty()) {
+        std::string studioScript = surreal::paths::ResolveScript("surreal_studio_3d.py");
+        std::error_code ec;
+        if (std::filesystem::exists(studioScript, ec) && std::filesystem::exists(studio3dPath, ec)) {
+            unlink("/tmp/surreal_studio_status.json");
+            unlink("/tmp/surreal_studio_ready.json");
+            g_studioAutoSpawnPending.store(true);
+            editor.SetStatus("[Studio3D] Launching 360° AI 3D + Blender Mixamo Auto-Rig...", 6.0f);
+            std::thread([studioScript, studio3dPath]() {
+                std::string cmd = "python3 " + surreal::paths::ShellEscapeSingle(studioScript) +
+                                  " " + surreal::paths::ShellEscapeSingle(studio3dPath) +
+                                  " --notify-engine --status-file /tmp/surreal_studio_status.json";
+                int rc = system(cmd.c_str());
+                (void)rc;
+            }).detach();
+        } else {
+            std::cerr << "[-] --studio3d missing script or input: " << studio3dPath << "\n";
+        }
+    }
+
+    // Always auto-spawn the 5 MEOVV Adaptive 3D Rubber-Suit figures (Gawon, Anna, Ella, Narin, Sooin)
     {
         std::string groupImg = surreal::paths::DefaultRigGroupImage(rigGroupPath);
         editor.AutoSegmentGroupIntoFigures(groupImg, engine.world, obstacles);
@@ -904,39 +1097,15 @@ int main(int argc, char* argv[]) {
                 reqFile.close();
                 unlink(reqPath); // Consume request immediately
 
-                auto getJsonString = [&](const std::string& key) -> std::string {
-                    size_t pos = reqContent.find("\"" + key + "\"");
-                    if (pos == std::string::npos) return "";
-                    size_t q1 = reqContent.find('"', reqContent.find(':', pos));
-                    if (q1 == std::string::npos) return "";
-                    size_t q2 = reqContent.find('"', q1 + 1);
-                    if (q2 == std::string::npos) return "";
-                    return reqContent.substr(q1 + 1, q2 - q1 - 1);
-                };
-                auto getJsonFloat = [&](const std::string& key, float defVal) -> float {
-                    size_t pos = reqContent.find("\"" + key + "\"");
-                    if (pos == std::string::npos) return defVal;
-                    size_t colon = reqContent.find(':', pos);
-                    if (colon == std::string::npos) return defVal;
-                    try { return std::stof(reqContent.substr(colon + 1)); } catch (...) { return defVal; }
-                };
-                auto getJsonInt = [&](const std::string& key, int defVal) -> int {
-                    size_t pos = reqContent.find("\"" + key + "\"");
-                    if (pos == std::string::npos) return defVal;
-                    size_t colon = reqContent.find(':', pos);
-                    if (colon == std::string::npos) return defVal;
-                    try { return std::stoi(reqContent.substr(colon + 1)); } catch (...) { return defVal; }
-                };
-
-                std::string modelPath = getJsonString("path");
-                int mode = getJsonInt("mode", 1);
-                float depth = getJsonFloat("depth", 0.45f);
-                float relief = getJsonFloat("relief", 0.35f);
-                float height = getJsonFloat("height", 2.20f);
-                bool genBackside = getJsonInt("generate_backside", 1) != 0;
-                bool anatSmooth = getJsonInt("anatomical_smooth", 1) != 0;
-                float bodyVol = getJsonFloat("body_volume", 1.0f);
-                int ironPasses = getJsonInt("ironing_passes", 1440);
+                std::string modelPath = ExtractJsonString(reqContent, "path");
+                int mode = ExtractJsonInt(reqContent, "mode", 1);
+                float depth = ExtractJsonFloat(reqContent, "depth", 0.45f);
+                float relief = ExtractJsonFloat(reqContent, "relief", 0.35f);
+                float height = ExtractJsonFloat(reqContent, "height", 2.20f);
+                bool genBackside = ExtractJsonInt(reqContent, "generate_backside", 1) != 0;
+                bool anatSmooth = ExtractJsonInt(reqContent, "anatomical_smooth", 1) != 0;
+                float bodyVol = ExtractJsonFloat(reqContent, "body_volume", 1.0f);
+                int ironPasses = ExtractJsonInt(reqContent, "ironing_passes", 1440);
 
                 if (!modelPath.empty()) {
                     Surreal::Image3DOptions userOpt;
@@ -956,6 +1125,66 @@ int main(int argc, char* argv[]) {
                         editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
                         editor.mode = Surreal::EditorMode::EDIT_MODE;
                         editor.SetStatus("[✓] High-precision 3D Model generated! Left-click to place into world.", 5.0f);
+                    }
+                }
+            }
+        }
+
+        // Poll async Studio 3D pipeline progress (/tmp/surreal_studio_status.json) (~4 Hz)
+        const char* studioStatusPath = "/tmp/surreal_studio_status.json";
+        struct stat stStatusStat;
+        if ((totalFramesRendered % 15) == 0 && stat(studioStatusPath, &stStatusStat) == 0) {
+            std::ifstream stFile(studioStatusPath);
+            if (stFile.is_open()) {
+                std::string stContent((std::istreambuf_iterator<char>(stFile)), std::istreambuf_iterator<char>());
+                stFile.close();
+                std::string stState = ExtractJsonString(stContent, "state");
+                std::string stMsg = ExtractJsonString(stContent, "message");
+                float stProg = ExtractJsonFloat(stContent, "progress", 0.0f);
+                if (stState == "error") {
+                    unlink(studioStatusPath);
+                    g_studioAutoSpawnPending.store(false);
+                    g_lastStudioStatusMsg.clear();
+                    editor.SetStatus("[-] " + stMsg, 8.0f);
+                } else if (stState == "done") {
+                    unlink(studioStatusPath);
+                    g_lastStudioStatusMsg.clear();
+                } else if (!stMsg.empty() && stMsg != g_lastStudioStatusMsg) {
+                    g_lastStudioStatusMsg = stMsg;
+                    editor.SetStatus("[Studio3D " + std::to_string(static_cast<int>(stProg * 100.0f)) + "%] " + stMsg, 6.0f);
+                }
+            }
+        }
+
+        // Consume completed Studio 3D rigged GLB (/tmp/surreal_studio_ready.json) (~4 Hz)
+        const char* studioReadyPath = "/tmp/surreal_studio_ready.json";
+        struct stat stReadyStat;
+        if ((totalFramesRendered % 15) == 0 && stat(studioReadyPath, &stReadyStat) == 0) {
+            std::ifstream readyFile(studioReadyPath);
+            if (readyFile.is_open()) {
+                std::string readyContent((std::istreambuf_iterator<char>(readyFile)), std::istreambuf_iterator<char>());
+                readyFile.close();
+                unlink(studioReadyPath);
+
+                std::string glbPath = ExtractJsonString(readyContent, "path");
+                float height = ExtractJsonFloat(readyContent, "height", 1.68f);
+                if (!glbPath.empty()) {
+                    editor.RefreshModelFolder();
+                    Surreal::Image3DOptions studioOpt;
+                    studioOpt.mode = 0;
+                    studioOpt.heightMeters = std::clamp(height, 0.8f, 4.0f);
+                    std::cout << "[✓] Studio 3D rigged GLB ready: " << glbPath << "\n";
+                    if (editor.LoadModelFromPath(glbPath, studioOpt)) {
+                        if (g_studioAutoSpawnPending.exchange(false)) {
+                            editor.placementPos = Surreal::Vec3(2.4f, 0.0f, 0.0f);
+                            editor.ConfirmPlacement(engine.world, obstacles);
+                            editor.SetStatus("[✓] Studio 3D rigged character spawned in plaza!", 6.0f);
+                        } else {
+                            editor.placementPos = editor.flyCamPos + editor.GetFlyForward() * 3.5f;
+                            editor.placementPos.y = std::max(0.0f, editor.placementPos.y);
+                            editor.mode = Surreal::EditorMode::EDIT_MODE;
+                            editor.SetStatus("[✓] Studio 3D rigged character ready! Left-click to place.", 6.0f);
+                        }
                     }
                 }
             }
@@ -1057,6 +1286,8 @@ int main(int argc, char* argv[]) {
                     } else if (sym == SDLK_F2) {
                         TriggerNativeSettingsDialog();
                         editor.SetStatus("[⚙] Opening Graphics & Engine Settings...", 3.0f);
+                    } else if (sym == SDLK_F8) {
+                        LaunchSmashCatsExternal(editor);
                     }
 
                     if ((mod & KMOD_CTRL) && (sym == SDLK_z || sym == SDLK_y)) {
@@ -1115,7 +1346,7 @@ int main(int argc, char* argv[]) {
                                 break;
                             case SDLK_h:
                                 showSkeletonDebug = !showSkeletonDebug;
-                                editor.SetStatus(showSkeletonDebug ? "[🦴 SKELETON] 20-Joint Rig Bones ON [H]" : "[🦴 SKELETON] Bones OFF [H]", 2.5f);
+                                editor.SetStatus(showSkeletonDebug ? "[🦴 SKELETON] Rig Bones ON [H]" : "[🦴 SKELETON] Bones OFF [H]", 2.5f);
                                 break;
                             case SDLK_q: playCamera.yaw -= 0.12f; break;
                             case SDLK_LEFT: playCamera.yaw -= 0.08f; break;
@@ -1484,6 +1715,8 @@ int main(int argc, char* argv[]) {
                                     editor.SaveLevel("scene_level.json");
                                 } else if (btn.id == "load") {
                                     editor.LoadLevel("scene_level.json", engine.world, obstacles);
+                                } else if (btn.id == "smash_cats") {
+                                    LaunchSmashCatsExternal(editor);
                                 }
                                 break;
                             }
@@ -2059,7 +2292,9 @@ int main(int argc, char* argv[]) {
 
                         for (size_t j = 0; j < skel->joints.size(); ++j) {
                             const auto& joint = skel->joints[j];
-                            Surreal::Vec3 jointWorld = worldM.TransformPoint(joint.globalMatrix.TransformPoint(Surreal::Vec3(0,0,0)));
+                            Surreal::Vec3 jointLocal = joint.globalMatrix.TransformPoint(Surreal::Vec3(0,0,0));
+                            jointLocal.y -= skel->footBaseOffset;
+                            Surreal::Vec3 jointWorld = worldM.TransformPoint(jointLocal);
                             int sx = 0, sy = 0;
                             if (Surreal::SurrealHUD::WorldToScreen(jointWorld, vpMat, winW, winH, sx, sy)) {
                                 screenX[j] = sx;
@@ -2068,63 +2303,9 @@ int main(int argc, char* argv[]) {
                             }
                         }
 
-                        auto drawBoneLine = [&](int jA, int jB, uint32_t col) {
-                            if (jA >= 0 && jA < static_cast<int>(skel->joints.size()) &&
-                                jB >= 0 && jB < static_cast<int>(skel->joints.size())) {
-                                if (onScreen[jA] && onScreen[jB]) {
-                                    // Draw crisp dual-pixel line for high visibility
-                                    Surreal::SurrealHUD::DrawLine(hudFramebuffer.data(), winW, winH, screenX[jA], screenY[jA], screenX[jB], screenY[jB], col);
-                                    Surreal::SurrealHUD::DrawLine(hudFramebuffer.data(), winW, winH, screenX[jA] + 1, screenY[jA], screenX[jB] + 1, screenY[jB], col);
-                                }
-                            }
-                        };
-
-                        // Draw anatomical hierarchical bone lines
-                        for (size_t j = 1; j < skel->joints.size(); ++j) {
-                            const auto& joint = skel->joints[j];
-                            // Skip ground Root (0) to Pelvis (1) line to avoid artificial crotch-to-floor tripod line
-                            if (joint.parentIndex > 0) {
-                                drawBoneLine(static_cast<int>(j), joint.parentIndex, 0xFF00FFCC);
-                            }
-                        }
-
-                        // Draw anatomical crossbars:
-                        // 1. Clavicle / Shoulder crossbar: Shoulder_L (6) <-> Shoulder_R (10)
-                        drawBoneLine(6, 10, 0xFF00FFCC);
-                        // 2. Pelvic girdle crossbar: UpLeg_L (14) <-> UpLeg_R (17)
-                        drawBoneLine(14, 17, 0xFF00FFCC);
-
-                        // Draw joint nodes (spheres)
-                        for (size_t j = 0; j < skel->joints.size(); ++j) {
-                            if (!onScreen[j]) continue;
-                            int sx = screenX[j];
-                            int sy = screenY[j];
-
-                            if (j == 0) continue; // Skip ground Root node
-
-                            if (j == 5) {
-                                // Head node: bright gold cranial sphere
-                                Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 4, 0xFFFFDD00);
-                            } else if (j == 1) {
-                                // Pelvis node: core amber center
-                                Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 4, 0xFFFFBB00);
-                            } else if (j == 3 || j == 4) {
-                                // Chest / Neck: golden yellow
-                                Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 3, 0xFFFFEE33);
-                            } else if (j == 6 || j == 10) {
-                                // Shoulders: neon yellow
-                                Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 3, 0xFFFFEE33);
-                            } else if (j == 9 || j == 13) {
-                                // Hands: neon cyan-gold
-                                Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 3, 0xFF55FFFF);
-                            } else if (j == 16 || j == 19) {
-                                // Feet: lime-cyan
-                                Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 3, 0xFF66FF88);
-                            } else {
-                                // General joint nodes
-                                Surreal::SurrealHUD::DrawCircle(hudFramebuffer.data(), winW, winH, sx, sy, 3, 0xFFFFCC00);
-                            }
-                        }
+                        DrawRoleBasedSkeletonOverlay(
+                            hudFramebuffer.data(), winW, winH, *skel,
+                            onScreen, screenX, screenY);
                     }
                 }
 
@@ -2187,7 +2368,9 @@ int main(int argc, char* argv[]) {
 
                     for (size_t j = 0; j < skel->joints.size(); ++j) {
                         const auto& joint = skel->joints[j];
-                        Surreal::Vec3 jointWorld = worldM.TransformPoint(joint.globalMatrix.TransformPoint(Surreal::Vec3(0,0,0)));
+                        Surreal::Vec3 jointLocal = joint.globalMatrix.TransformPoint(Surreal::Vec3(0,0,0));
+                        jointLocal.y -= skel->footBaseOffset;
+                        Surreal::Vec3 jointWorld = worldM.TransformPoint(jointLocal);
                         int sx = 0, sy = 0;
                         if (Surreal::SurrealHUD::WorldToScreen(jointWorld, vpMatCpu, winW, winH, sx, sy)) {
                             screenX[j] = sx;
@@ -2196,35 +2379,9 @@ int main(int argc, char* argv[]) {
                         }
                     }
 
-                    auto drawBoneLine = [&](int jA, int jB, uint32_t col) {
-                        if (jA >= 0 && jA < static_cast<int>(skel->joints.size()) &&
-                            jB >= 0 && jB < static_cast<int>(skel->joints.size())) {
-                            if (onScreen[jA] && onScreen[jB]) {
-                                Surreal::SurrealHUD::DrawLine(framebuffer.data(), winW, winH, screenX[jA], screenY[jA], screenX[jB], screenY[jB], col);
-                                Surreal::SurrealHUD::DrawLine(framebuffer.data(), winW, winH, screenX[jA] + 1, screenY[jA], screenX[jB] + 1, screenY[jB], col);
-                            }
-                        }
-                    };
-
-                    for (size_t j = 1; j < skel->joints.size(); ++j) {
-                        const auto& joint = skel->joints[j];
-                        if (joint.parentIndex > 0) {
-                            drawBoneLine(static_cast<int>(j), joint.parentIndex, 0xFF00FFCC);
-                        }
-                    }
-                    drawBoneLine(6, 10, 0xFF00FFCC);
-                    drawBoneLine(14, 17, 0xFF00FFCC);
-
-                    for (size_t j = 0; j < skel->joints.size(); ++j) {
-                        if (!onScreen[j] || j == 0) continue;
-                        int sx = screenX[j], sy = screenY[j];
-                        if (j == 5) Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 4, 0xFFFFDD00);
-                        else if (j == 1) Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 4, 0xFFFFBB00);
-                        else if (j == 3 || j == 4 || j == 6 || j == 10) Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 3, 0xFFFFEE33);
-                        else if (j == 9 || j == 13) Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 3, 0xFF55FFFF);
-                        else if (j == 16 || j == 19) Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 3, 0xFF66FF88);
-                        else Surreal::SurrealHUD::DrawCircle(framebuffer.data(), winW, winH, sx, sy, 3, 0xFFFFCC00);
-                    }
+                    DrawRoleBasedSkeletonOverlay(
+                        framebuffer.data(), winW, winH, *skel,
+                        onScreen, screenX, screenY);
                 }
             }
 

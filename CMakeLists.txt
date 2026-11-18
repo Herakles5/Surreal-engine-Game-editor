@@ -35,6 +35,20 @@ target_link_libraries(surreal-editor
     m
 )
 
+# 1b. Smash Cats 3D: Surreal Edition
+add_executable(surreal-smash-cats surreal_smash_cats.cpp)
+target_compile_definitions(surreal-smash-cats PRIVATE SURREAL_EXTERNAL_THIRD_PARTY_IMPL)
+target_link_libraries(surreal-smash-cats
+    PRIVATE
+    surreal_third_party
+    ${OPENGL_LIBRARIES}
+    ${SDL2_LIBRARIES}
+    Threads::Threads
+    OpenMP::OpenMP_CXX
+    ${CMAKE_DL_LIBS}
+    m
+)
+
 # 2. Surreal Automated Benchmark
 add_executable(surreal-bench test_surreal_benchmark.cpp)
 target_compile_definitions(surreal-bench PRIVATE SURREAL_EXTERNAL_THIRD_PARTY_IMPL)
@@ -84,11 +98,13 @@ enable_testing()
 add_test(NAME surreal_suite COMMAND test_surreal_suite WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME surreal_gltf COMMAND test_surreal_gltf WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME surreal_dojo_headless COMMAND surreal-editor --benchmark-headless WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME smash_cats_headless COMMAND surreal-smash-cats --headless WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Install rules
-install(TARGETS surreal-editor surreal-bench surreal-photo3d DESTINATION bin)
+install(TARGETS surreal-editor surreal-smash-cats surreal-bench surreal-photo3d DESTINATION bin)
 install(FILES
     surreal_engine.hpp
+    surreal_smash_cats.hpp
     surreal_hybrid_renderer.hpp
     surreal_math.hpp
     surreal_pbr.hpp

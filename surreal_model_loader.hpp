@@ -411,6 +411,24 @@ public:
             }
         }
 
+        // Studio AI generated rigged 3D models live in "studio3d"
+        fs::path studioDir = fs::path(folderPath) / "studio3d";
+        if (fs::exists(studioDir, ec) && fs::is_directory(studioDir, ec)) {
+            for (const auto& entry : fs::directory_iterator(studioDir, ec)) {
+                if (!entry.is_regular_file(ec) && !(entry.is_symlink(ec) && fs::is_regular_file(entry.path(), ec))) continue;
+                std::string ext = entry.path().extension().string();
+                for (auto& c : ext) c = tolower(c);
+                if (ext == ".obj" || ext == ".gltf" || ext == ".glb") {
+                    DiscoveredModelFile item;
+                    item.filename = entry.path().filename().string();
+                    item.fullPath = entry.path().string();
+                    item.extension = ext;
+                    item.sizeBytes = fs::file_size(entry.path(), ec);
+                    results.push_back(item);
+                }
+            }
+        }
+
         // Pictures for Photo-to-3D live in the sub-folder "photo3d" (so texture images are never listed).
         fs::path photoDir = fs::path(folderPath) / "photo3d";
         if (fs::exists(photoDir, ec) && fs::is_directory(photoDir, ec)) {

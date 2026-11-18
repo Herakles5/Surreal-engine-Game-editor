@@ -19,6 +19,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
 from gi.repository import Gtk, Gdk, GLib
+from surreal_gtk_theme import apply_black_gold_theme
 
 SETTINGS_FILE = "/tmp/surreal_runtime_settings.json"
 
@@ -39,121 +40,6 @@ DEFAULT_SETTINGS = {
     "action": ""
 }
 
-CSS_DATA = b"""
-window {
-    background-color: #070b14;
-    color: #dce3ed;
-    font-family: 'Monospace', 'DejaVu Sans Mono', sans-serif;
-    font-size: 13px;
-}
-headerbar {
-    background: #04070e;
-    border-bottom: 2px solid #00ffcc;
-    color: #00ffcc;
-}
-.cyber-card {
-    background-color: #0b1322;
-    border: 1px solid #16263e;
-    border-radius: 6px;
-    padding: 10px 14px;
-    margin-bottom: 6px;
-}
-.cyber-title {
-    color: #00ffcc;
-    font-weight: bold;
-    font-size: 12px;
-    margin-bottom: 4px;
-}
-.btn-auto-balance {
-    background: linear-gradient(135deg, #0b2f38 0%, #1a1538 100%);
-    color: #00ffcc;
-    border: 2px solid #00ffcc;
-    border-radius: 6px;
-    padding: 10px 16px;
-    font-weight: bold;
-    font-size: 14px;
-}
-.btn-auto-balance:hover {
-    background: linear-gradient(135deg, #124d5c 0%, #2e2463 100%);
-    border-color: #ff007f;
-    color: #ffffff;
-}
-.btn-preset {
-    background-color: #111a2a;
-    color: #88bbdd;
-    border: 1px solid #223854;
-    border-radius: 4px;
-    padding: 5px 10px;
-    font-size: 11px;
-}
-.btn-preset:hover {
-    background-color: #1a2c48;
-    color: #00ffcc;
-    border-color: #00ffcc;
-}
-scale {
-    margin: 2px 0px;
-}
-scale highlight {
-    background-color: #00ffcc;
-}
-scale slider {
-    background-color: #ff007f;
-    min-width: 16px;
-    min-height: 16px;
-    border-radius: 8px;
-    border: 1px solid #ffffff;
-}
-combobox button {
-    background-color: #0f1c2e;
-    color: #00ffcc;
-    border: 1px solid #00ffcc;
-    border-radius: 4px;
-    padding: 3px 8px;
-}
-combobox button:hover {
-    background-color: #182d4a;
-    border-color: #ff007f;
-    color: #ff007f;
-}
-checkbutton check {
-    background-color: #0f1c2e;
-    border: 1px solid #00ffcc;
-    border-radius: 3px;
-    min-width: 15px;
-    min-height: 15px;
-}
-checkbutton check:checked {
-    background-color: #00ffcc;
-}
-.btn-reset {
-    background-color: #1c1420;
-    color: #ffaa00;
-    border: 1px solid #ffaa00;
-    border-radius: 4px;
-    padding: 6px 14px;
-    font-weight: bold;
-}
-.btn-reset:hover {
-    background-color: #331e3d;
-    border-color: #ff007f;
-    color: #ff007f;
-}
-.btn-close {
-    background-color: #0e222d;
-    color: #00ffcc;
-    border: 1px solid #00ffcc;
-    border-radius: 4px;
-    padding: 6px 16px;
-    font-weight: bold;
-}
-.btn-close:hover {
-    background-color: #183e54;
-    border-color: #ffffff;
-    color: #ffffff;
-}
-"""
-
 class SurrealSettingsWindow(Gtk.Window):
     def __init__(self):
         super().__init__(title="⚙️ AION Surreal 3D // Graphics, Lighting & Hardware Balancer")
@@ -162,14 +48,8 @@ class SurrealSettingsWindow(Gtk.Window):
         self.set_keep_above(True)
         self.set_border_width(12)
 
-        # Apply CSS Styling
-        css_provider = Gtk.CssProvider()
-        css_provider.load_from_data(CSS_DATA)
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(),
-            css_provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-        )
+        # Apply High-Contrast Black & Gold / Yellow CSS Theme
+        self._css_provider = apply_black_gold_theme()
 
         self.settings = self.load_settings()
         self.is_updating_ui = True
@@ -186,7 +66,7 @@ class SurrealSettingsWindow(Gtk.Window):
         # Header Title
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         lbl_title = Gtk.Label()
-        lbl_title.set_markup("<span size='large' weight='bold' color='#00ffcc'>⚙️ AION SURREAL 3D // GRAPHICS &amp; ENGINE SETTINGS</span>")
+        lbl_title.set_markup("<span size='large' weight='bold' color='#ffd700'>⚙️ AION SURREAL 3D // GRAPHICS &amp; ENGINE SETTINGS</span>")
         header_box.pack_start(lbl_title, False, False, 0)
         main_box.pack_start(header_box, False, False, 0)
 
@@ -197,7 +77,7 @@ class SurrealSettingsWindow(Gtk.Window):
         card_auto.get_style_context().add_class("cyber-card")
 
         ca_title = Gtk.Label()
-        ca_title.set_markup("<span class='cyber-title'>[ 🚀 HARDWARE OPTIMIZATION &amp; AUTO-BALANCE ]</span>")
+        ca_title.set_markup("<span color='#ffd700' weight='bold'>[ 🚀 HARDWARE OPTIMIZATION &amp; AUTO-BALANCE ]</span>")
         ca_title.set_xalign(0.0)
         card_auto.pack_start(ca_title, False, False, 0)
 
@@ -228,7 +108,7 @@ class SurrealSettingsWindow(Gtk.Window):
         # Live FPS Telemetry line
         self.lbl_fps_telemetry = Gtk.Label()
         fps_val = self.settings.get("current_fps", 30.0)
-        self.lbl_fps_telemetry.set_markup(f"<span size='small' color='#00ff88'>● Live Framerate: <b>{fps_val:.1f} FPS</b></span> | <span size='small' color='#88aacc'>Target Range: 30 - 60 FPS</span>")
+        self.lbl_fps_telemetry.set_markup(f"<span size='small' color='#5cff8d'>● Live Framerate: <b>{fps_val:.1f} FPS</b></span> | <span size='small' color='#e5ca6b'>Target Range: 30 - 60 FPS</span>")
         self.lbl_fps_telemetry.set_xalign(0.0)
         card_auto.pack_start(self.lbl_fps_telemetry, False, False, 0)
 
@@ -241,7 +121,7 @@ class SurrealSettingsWindow(Gtk.Window):
         card_light.get_style_context().add_class("cyber-card")
 
         cl_title = Gtk.Label()
-        cl_title.set_markup("<span class='cyber-title'>[ 💡 LIGHTING &amp; SUN / AMBIENT CONTROLS ]</span>")
+        cl_title.set_markup("<span color='#ffd700' weight='bold'>[ 💡 LIGHTING &amp; SUN / AMBIENT CONTROLS ]</span>")
         cl_title.set_xalign(0.0)
         card_light.pack_start(cl_title, False, False, 0)
 
@@ -252,7 +132,7 @@ class SurrealSettingsWindow(Gtk.Window):
         row_sun.pack_start(lbl_sun, True, True, 0)
         self.lbl_sun_val = Gtk.Label()
         sun_pct = int(self.settings.get("sun_intensity", 1.0) * 100)
-        self.lbl_sun_val.set_markup(f"<span color='#ffcc00'>{sun_pct}%</span>")
+        self.lbl_sun_val.set_markup(f"<span color='#ffd700'>{sun_pct}%</span>")
         row_sun.pack_end(self.lbl_sun_val, False, False, 0)
         card_light.pack_start(row_sun, False, False, 0)
 
@@ -269,7 +149,7 @@ class SurrealSettingsWindow(Gtk.Window):
         row_amb.pack_start(lbl_amb, True, True, 0)
         self.lbl_amb_val = Gtk.Label()
         amb_pct = int(self.settings.get("ambient_intensity", 1.0) * 100)
-        self.lbl_amb_val.set_markup(f"<span color='#00e5ff'>{amb_pct}%</span>")
+        self.lbl_amb_val.set_markup(f"<span color='#ffe875'>{amb_pct}%</span>")
         row_amb.pack_end(self.lbl_amb_val, False, False, 0)
         card_light.pack_start(row_amb, False, False, 0)
 
@@ -281,7 +161,7 @@ class SurrealSettingsWindow(Gtk.Window):
 
         # 3. Active Point Lights Count & Intensity
         row_pl = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        lbl_pl = Gtk.Label(label="Active Streetlights &amp; Neon Sources:")
+        lbl_pl = Gtk.Label(label="Active Streetlights & Neon Sources:")
         lbl_pl.set_xalign(0.0)
         row_pl.pack_start(lbl_pl, True, True, 0)
 
@@ -305,7 +185,7 @@ class SurrealSettingsWindow(Gtk.Window):
         card_shader.get_style_context().add_class("cyber-card")
 
         cs_title = Gtk.Label()
-        cs_title.set_markup("<span class='cyber-title'>[ 🔮 SHADER &amp; PBR EFFECTS ]</span>")
+        cs_title.set_markup("<span color='#ffd700' weight='bold'>[ 🔮 SHADER &amp; PBR EFFECTS ]</span>")
         cs_title.set_xalign(0.0)
         card_shader.pack_start(cs_title, False, False, 0)
 
@@ -327,12 +207,12 @@ class SurrealSettingsWindow(Gtk.Window):
 
         # Wetness Slider
         wet_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        lbl_wet = Gtk.Label(label="Puddle Reflections &amp; Wetness:")
+        lbl_wet = Gtk.Label(label="Puddle Reflections & Wetness:")
         lbl_wet.set_xalign(0.0)
         wet_box.pack_start(lbl_wet, True, True, 0)
         self.lbl_wet_val = Gtk.Label()
         wet_pct = int(self.settings.get("wetness", 0.75) * 100)
-        self.lbl_wet_val.set_markup(f"<span color='#00ffcc'>{wet_pct}%</span>")
+        self.lbl_wet_val.set_markup(f"<span color='#ffe875'>{wet_pct}%</span>")
         wet_box.pack_end(self.lbl_wet_val, False, False, 0)
         card_shader.pack_start(wet_box, False, False, 0)
 
@@ -344,12 +224,12 @@ class SurrealSettingsWindow(Gtk.Window):
 
         # Neon Glow Slider
         glow_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        lbl_glow = Gtk.Label(label="Neon &amp; Window Glow Intensity:")
+        lbl_glow = Gtk.Label(label="Neon & Window Glow Intensity:")
         lbl_glow.set_xalign(0.0)
         glow_box.pack_start(lbl_glow, True, True, 0)
         self.lbl_glow_val = Gtk.Label()
         glow_pct = int(self.settings.get("glow_intensity", 1.30) * 100)
-        self.lbl_glow_val.set_markup(f"<span color='#ff007f'>{glow_pct}%</span>")
+        self.lbl_glow_val.set_markup(f"<span color='#ffd700'>{glow_pct}%</span>")
         glow_box.pack_end(self.lbl_glow_val, False, False, 0)
         card_shader.pack_start(glow_box, False, False, 0)
 
@@ -368,7 +248,7 @@ class SurrealSettingsWindow(Gtk.Window):
         card_shad.get_style_context().add_class("cyber-card")
 
         csh_title = Gtk.Label()
-        csh_title.set_markup("<span class='cyber-title'>[ 👥 REAL-TIME SHADOWS ]</span>")
+        csh_title.set_markup("<span color='#ffd700' weight='bold'>[ 👥 REAL-TIME SHADOWS ]</span>")
         csh_title.set_xalign(0.0)
         card_shad.pack_start(csh_title, False, False, 0)
 
@@ -378,12 +258,12 @@ class SurrealSettingsWindow(Gtk.Window):
         card_shad.pack_start(self.chk_shadows, False, False, 0)
 
         row_shado = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        lbl_shado = Gtk.Label(label="Shadow Opacity &amp; Depth:")
+        lbl_shado = Gtk.Label(label="Shadow Opacity & Depth:")
         lbl_shado.set_xalign(0.0)
         row_shado.pack_start(lbl_shado, True, True, 0)
         self.lbl_shado_val = Gtk.Label()
         so_pct = int(self.settings.get("shadow_opacity", 0.85) * 100)
-        self.lbl_shado_val.set_markup(f"<span color='#00ff88'>{so_pct}%</span>")
+        self.lbl_shado_val.set_markup(f"<span color='#ffe875'>{so_pct}%</span>")
         row_shado.pack_end(self.lbl_shado_val, False, False, 0)
         card_shad.pack_start(row_shado, False, False, 0)
 
@@ -402,7 +282,7 @@ class SurrealSettingsWindow(Gtk.Window):
         card_cam.get_style_context().add_class("cyber-card")
 
         cc_title = Gtk.Label()
-        cc_title.set_markup("<span class='cyber-title'>[ 🎥 CAMERA &amp; ATMOSPHERE ]</span>")
+        cc_title.set_markup("<span color='#ffd700' weight='bold'>[ 🎥 CAMERA &amp; ATMOSPHERE ]</span>")
         cc_title.set_xalign(0.0)
         card_cam.pack_start(cc_title, False, False, 0)
 
@@ -425,7 +305,7 @@ class SurrealSettingsWindow(Gtk.Window):
 
         # Sky Profile
         row_sky = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        lbl_sky = Gtk.Label(label="Sky &amp; Atmosphere Profile:")
+        lbl_sky = Gtk.Label(label="Sky & Atmosphere Profile:")
         lbl_sky.set_xalign(0.0)
         row_sky.pack_start(lbl_sky, True, True, 0)
 
@@ -446,7 +326,7 @@ class SurrealSettingsWindow(Gtk.Window):
         lbl_fov.set_xalign(0.0)
         fov_box.pack_start(lbl_fov, True, True, 0)
         self.lbl_fov_val = Gtk.Label()
-        self.lbl_fov_val.set_markup(f"<span color='#00e5ff'>{int(self.settings.get('fov', 65.0))}°</span>")
+        self.lbl_fov_val.set_markup(f"<span color='#ffe875'>{int(self.settings.get('fov', 65.0))}°</span>")
         fov_box.pack_end(self.lbl_fov_val, False, False, 0)
         card_cam.pack_start(fov_box, False, False, 0)
 
@@ -521,10 +401,10 @@ class SurrealSettingsWindow(Gtk.Window):
                         data = json.load(f)
                     fps = data.get("current_fps", 0.0)
                     if fps > 0.0:
-                        fps_col = "#00ff88" if fps >= 30.0 else "#ffcc00" if fps >= 20.0 else "#ff3366"
+                        fps_col = "#5cff8d" if fps >= 30.0 else "#ffd700" if fps >= 20.0 else "#ff6b6b"
                         self.lbl_fps_telemetry.set_markup(
                             f"<span size='small' color='{fps_col}'>● Live Framerate: <b>{fps:.1f} FPS</b></span> | "
-                            f"<span size='small' color='#88aacc'>Zielbereich: 30 - 60 FPS</span>"
+                            f"<span size='small' color='#e5ca6b'>Zielbereich: 30 - 60 FPS</span>"
                         )
             except Exception:
                 pass
@@ -589,51 +469,51 @@ class SurrealSettingsWindow(Gtk.Window):
         self.cb_shader_qual.set_active_id(str(self.settings.get("shader_quality", 1)))
         self.cb_point_count.set_active_id(str(self.settings.get("point_light_count", 4)))
         self.scale_wet.set_value(self.settings.get("wetness", 0.75) * 100.0)
-        self.lbl_wet_val.set_markup(f"<span color='#00ffcc'>{int(self.settings['wetness'] * 100)}%</span>")
+        self.lbl_wet_val.set_markup(f"<span color='#ffe875'>{int(self.settings['wetness'] * 100)}%</span>")
         self.scale_glow.set_value(self.settings.get("glow_intensity", 1.30) * 100.0)
-        self.lbl_glow_val.set_markup(f"<span color='#ff007f'>{int(self.settings['glow_intensity'] * 100)}%</span>")
+        self.lbl_glow_val.set_markup(f"<span color='#ffd700'>{int(self.settings['glow_intensity'] * 100)}%</span>")
         self.chk_shadows.set_active(self.settings.get("shadows", True))
         self.scale_shadow_op.set_value(self.settings.get("shadow_opacity", 0.85) * 100.0)
-        self.lbl_shado_val.set_markup(f"<span color='#00ff88'>{int(self.settings['shadow_opacity'] * 100)}%</span>")
+        self.lbl_shado_val.set_markup(f"<span color='#ffe875'>{int(self.settings['shadow_opacity'] * 100)}%</span>")
 
     def on_sun_changed(self, widget):
         val = widget.get_value()
-        self.lbl_sun_val.set_markup(f"<span color='#ffcc00'>{int(val)}%</span>")
+        self.lbl_sun_val.set_markup(f"<span color='#ffd700'>{int(val)}%</span>")
         if not self.is_updating_ui:
             self.settings["sun_intensity"] = val / 100.0
             self.save_settings()
 
     def on_amb_changed(self, widget):
         val = widget.get_value()
-        self.lbl_amb_val.set_markup(f"<span color='#00e5ff'>{int(val)}%</span>")
+        self.lbl_amb_val.set_markup(f"<span color='#ffe875'>{int(val)}%</span>")
         if not self.is_updating_ui:
             self.settings["ambient_intensity"] = val / 100.0
             self.save_settings()
 
     def on_wetness_changed(self, widget):
         val = widget.get_value()
-        self.lbl_wet_val.set_markup(f"<span color='#00ffcc'>{int(val)}%</span>")
+        self.lbl_wet_val.set_markup(f"<span color='#ffe875'>{int(val)}%</span>")
         if not self.is_updating_ui:
             self.settings["wetness"] = val / 100.0
             self.save_settings()
 
     def on_glow_changed(self, widget):
         val = widget.get_value()
-        self.lbl_glow_val.set_markup(f"<span color='#ff007f'>{int(val)}%</span>")
+        self.lbl_glow_val.set_markup(f"<span color='#ffd700'>{int(val)}%</span>")
         if not self.is_updating_ui:
             self.settings["glow_intensity"] = val / 100.0
             self.save_settings()
 
     def on_shadow_op_changed(self, widget):
         val = widget.get_value()
-        self.lbl_shado_val.set_markup(f"<span color='#00ff88'>{int(val)}%</span>")
+        self.lbl_shado_val.set_markup(f"<span color='#ffe875'>{int(val)}%</span>")
         if not self.is_updating_ui:
             self.settings["shadow_opacity"] = val / 100.0
             self.save_settings()
 
     def on_fov_changed(self, widget):
         val = widget.get_value()
-        self.lbl_fov_val.set_markup(f"<span color='#00e5ff'>{int(val)}°</span>")
+        self.lbl_fov_val.set_markup(f"<span color='#ffe875'>{int(val)}°</span>")
         if not self.is_updating_ui:
             self.settings["fov"] = float(val)
             self.save_settings()
@@ -663,18 +543,18 @@ class SurrealSettingsWindow(Gtk.Window):
         self.cb_backend.set_active_id(self.settings["backend"])
         self.cb_sky.set_active_id(str(self.settings["sky_profile"]))
         self.scale_sun.set_value(self.settings["sun_intensity"] * 100.0)
-        self.lbl_sun_val.set_markup(f"<span color='#ffcc00'>{int(self.settings['sun_intensity'] * 100)}%</span>")
+        self.lbl_sun_val.set_markup(f"<span color='#ffd700'>{int(self.settings['sun_intensity'] * 100)}%</span>")
         self.scale_amb.set_value(self.settings["ambient_intensity"] * 100.0)
-        self.lbl_amb_val.set_markup(f"<span color='#00e5ff'>{int(self.settings['ambient_intensity'] * 100)}%</span>")
+        self.lbl_amb_val.set_markup(f"<span color='#ffe875'>{int(self.settings['ambient_intensity'] * 100)}%</span>")
         self.scale_wet.set_value(self.settings["wetness"] * 100.0)
-        self.lbl_wet_val.set_markup(f"<span color='#00ffcc'>{int(self.settings['wetness'] * 100)}%</span>")
+        self.lbl_wet_val.set_markup(f"<span color='#ffe875'>{int(self.settings['wetness'] * 100)}%</span>")
         self.scale_glow.set_value(self.settings["glow_intensity"] * 100.0)
-        self.lbl_glow_val.set_markup(f"<span color='#ff007f'>{int(self.settings['glow_intensity'] * 100)}%</span>")
+        self.lbl_glow_val.set_markup(f"<span color='#ffd700'>{int(self.settings['glow_intensity'] * 100)}%</span>")
         self.scale_fov.set_value(self.settings["fov"])
-        self.lbl_fov_val.set_markup(f"<span color='#00e5ff'>{int(self.settings['fov'])}°</span>")
+        self.lbl_fov_val.set_markup(f"<span color='#ffe875'>{int(self.settings['fov'])}°</span>")
         self.chk_shadows.set_active(self.settings["shadows"])
         self.scale_shadow_op.set_value(self.settings["shadow_opacity"] * 100.0)
-        self.lbl_shado_val.set_markup(f"<span color='#00ff88'>{int(self.settings['shadow_opacity'] * 100)}%</span>")
+        self.lbl_shado_val.set_markup(f"<span color='#ffe875'>{int(self.settings['shadow_opacity'] * 100)}%</span>")
         self.cb_shader_qual.set_active_id(str(self.settings["shader_quality"]))
         self.cb_point_count.set_active_id(str(self.settings["point_light_count"]))
         self.is_updating_ui = False

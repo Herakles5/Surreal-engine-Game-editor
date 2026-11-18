@@ -53,6 +53,7 @@ inline std::vector<std::filesystem::path> GetSearchRoots() {
     if (!exeDir.empty()) {
         AppendUniqueRoot(roots, exeDir);
         AppendUniqueRoot(roots, exeDir.parent_path());
+        AppendUniqueRoot(roots, exeDir.parent_path() / "share" / "surreal");
     }
     AppendUniqueRoot(roots, "/usr/local/share/surreal");
     AppendUniqueRoot(roots, "/usr/share/surreal");

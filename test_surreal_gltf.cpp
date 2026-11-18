@@ -7,6 +7,8 @@
 
 #include "surreal_engine.hpp"
 #include "surreal_gltf.hpp"
+#include "surreal_paths.hpp"
+#include <filesystem>
 #include <iostream>
 #include <chrono>
 
@@ -16,7 +18,10 @@ int main() {
     std::cout << "  Hybrid Linux & CosmOS Bare-Metal Model Pipeline\n";
     std::cout << "=========================================================\n";
 
-    const std::string modelPath = "/root/coding/MeinOS/avatar/scene.gltf";
+    std::string modelPath = surreal::paths::ResolveAsset("avatar/scene.gltf");
+    if (!std::filesystem::exists(modelPath)) {
+        modelPath = "/root/coding/MeinOS/avatar/scene.gltf";
+    }
     std::cout << "[*] Loading 3D Character Model: " << modelPath << "\n";
 
     auto tLoadStart = std::chrono::high_resolution_clock::now();

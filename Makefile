@@ -7,19 +7,21 @@ CXXFLAGS ?= -O2 -mavx2 -mfma -fopenmp -pthread -std=c++20 -DSURREAL_EXTERNAL_THI
 LDFLAGS ?= -lGL -lSDL2 -ldl -lm -fopenmp
 
 TARGET_STUDIO = surreal-editor
+TARGET_SMASH = surreal-smash-cats
 TARGET_BENCH = surreal-bench
 TARGET_PHOTO = surreal-photo3d
 TARGET_SUITE = test_surreal_suite
 TARGET_GLTF = test_surreal_gltf
 
 SRCS_STUDIO = surreal_live_dojo.cpp
+SRCS_SMASH = surreal_smash_cats.cpp
 SRCS_BENCH = test_surreal_benchmark.cpp
 SRCS_PHOTO = photo3d_preview.cpp
 SRCS_SUITE = test_surreal_suite.cpp
 SRCS_GLTF = test_surreal_gltf.cpp
 THIRD_PARTY_OBJ = surreal_third_party.o
 
-all: $(TARGET_STUDIO) $(TARGET_BENCH) $(TARGET_PHOTO) $(TARGET_SUITE) $(TARGET_GLTF)
+all: $(TARGET_STUDIO) $(TARGET_SMASH) $(TARGET_BENCH) $(TARGET_PHOTO) $(TARGET_SUITE) $(TARGET_GLTF)
 
 $(THIRD_PARTY_OBJ): surreal_third_party.cpp cgltf.h stb_image.h
 	@echo "[BUILD] Compiling Shared Third-Party Objects (cgltf + stb_image)..."
@@ -28,14 +30,20 @@ $(THIRD_PARTY_OBJ): surreal_third_party.cpp cgltf.h stb_image.h
 $(TARGET_STUDIO): $(SRCS_STUDIO) $(THIRD_PARTY_OBJ) *.hpp
 	@echo "[BUILD] Compiling Surreal 3D Studio..."
 	$(CXX) $(CXXFLAGS) $(SRCS_STUDIO) $(THIRD_PARTY_OBJ) $(LDFLAGS) -o $(TARGET_STUDIO)
+	@cp -f $(TARGET_STUDIO) surreal_live_dojo
 	@echo "[✓] $(TARGET_STUDIO) built successfully."
+
+$(TARGET_SMASH): $(SRCS_SMASH) $(THIRD_PARTY_OBJ) *.hpp
+	@echo "[BUILD] Compiling Smash Cats 3D: Surreal Edition..."
+	$(CXX) $(CXXFLAGS) $(SRCS_SMASH) $(THIRD_PARTY_OBJ) $(LDFLAGS) -o $(TARGET_SMASH)
+	@echo "[✓] $(TARGET_SMASH) built successfully."
 
 $(TARGET_BENCH): $(SRCS_BENCH) $(THIRD_PARTY_OBJ) *.hpp
 	@echo "[BUILD] Compiling Surreal Benchmark Suite..."
 	$(CXX) $(CXXFLAGS) $(SRCS_BENCH) $(THIRD_PARTY_OBJ) $(LDFLAGS) -o $(TARGET_BENCH)
 	@echo "[✓] $(TARGET_BENCH) built successfully."
 
-$(TARGET_PHOTO): $(SRCS_PHOTO) $(THIRD_PARTY_OBJ) surreal_image3d.hpp surreal_engine.hpp
+$(TARGET_PHOTO): $(SRCS_PHOTO) $(THIRD_PARTY_OBJ) *.hpp
 	@echo "[BUILD] Compiling Photo-to-3D preview tool..."
 	$(CXX) $(CXXFLAGS) $(SRCS_PHOTO) $(THIRD_PARTY_OBJ) -lm -pthread -fopenmp -o $(TARGET_PHOTO)
 	@echo "[✓] $(TARGET_PHOTO) built successfully."
@@ -59,6 +67,6 @@ install: all
 	./install_surreal.sh
 
 clean:
-	rm -f $(TARGET_STUDIO) $(TARGET_BENCH) $(TARGET_PHOTO) $(TARGET_SUITE) $(TARGET_GLTF) *.o
+	rm -f $(TARGET_STUDIO) $(TARGET_SMASH) $(TARGET_BENCH) $(TARGET_PHOTO) $(TARGET_SUITE) $(TARGET_GLTF) *.o
 
 .PHONY: all test clean install

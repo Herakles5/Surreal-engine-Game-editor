@@ -35,10 +35,59 @@
 #include <cstring>
 #include <algorithm>
 #include <iostream>
+#include <fstream>
 #include <map>
 #include <filesystem>
+#if defined(__linux__)
+#  include <dlfcn.h>
+#endif
 
 namespace Surreal {
+
+inline cgltf_image* ResolveGlTFTextureImage(const cgltf_texture* tex) {
+    if (!tex) return nullptr;
+    if (tex->image) return tex->image;
+    if (tex->has_webp && tex->webp_image) return tex->webp_image;
+    return nullptr;
+}
+
+inline std::vector<uint8_t> DecodeWebPRGBA(const uint8_t* data, size_t len, int* outW, int* outH) {
+    std::vector<uint8_t> rgba;
+    if (!data || len < 12 || !outW || !outH) return rgba;
+    if (std::memcmp(data, "RIFF", 4) != 0 || std::memcmp(data + 8, "WEBP", 4) != 0) return rgba;
+#if defined(__linux__)
+    using DecodeFn = uint8_t* (*)(const uint8_t*, size_t, int*, int*);
+    using FreeFn = void (*)(void*);
+    struct WebPApi {
+        void* handle = nullptr;
+        DecodeFn decode = nullptr;
+        FreeFn freeFn = nullptr;
+        WebPApi() {
+            handle = dlopen("libwebp.so.7", RTLD_LAZY | RTLD_LOCAL);
+            if (!handle) handle = dlopen("libwebp.so", RTLD_LAZY | RTLD_LOCAL);
+            if (handle) {
+                decode = reinterpret_cast<DecodeFn>(dlsym(handle, "WebPDecodeRGBA"));
+                freeFn = reinterpret_cast<FreeFn>(dlsym(handle, "WebPFree"));
+            }
+        }
+    };
+    static WebPApi api;
+    if (api.decode) {
+        int w = 0, h = 0;
+        uint8_t* decoded = api.decode(data, len, &w, &h);
+        if (decoded && w > 0 && h > 0) {
+            rgba.assign(decoded, decoded + static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+            *outW = w;
+            *outH = h;
+        }
+        if (decoded) {
+            if (api.freeFn) api.freeFn(decoded);
+            else free(decoded);
+        }
+    }
+#endif
+    return rgba;
+}
 
 // Spherical Linear Interpolation for Quaternions
 inline Quat Slerp(const Quat& q1, const Quat& q2, float t) {
@@ -120,6 +169,9 @@ struct SkeletonJoint {
     Quat baseRotation;
     Vec3 baseScale;
 
+    // Proportional skeleton bone-length scaling (preserved across animation playback)
+    Vec3 boneLengthScale;
+
     // Computed world matrix & final skin matrix
     Mat4 localMatrix;
     Mat4 globalMatrix;
@@ -135,6 +187,7 @@ struct SkeletonJoint {
           baseTranslation(0, 0, 0),
           baseRotation(0, 0, 0, 1.0f),
           baseScale(1.0f, 1.0f, 1.0f),
+          boneLengthScale(1.0f, 1.0f, 1.0f),
           localMatrix(Mat4::Identity()),
           globalMatrix(Mat4::Identity()),
           skinMatrix(Mat4::Identity()) {}
@@ -192,6 +245,8 @@ public:
     bool skinVBOUploaded = false;
     uint64_t skinPaletteVersion = 0;
     float skinDtAccum = 0.0f;
+    Vec3 rootNormalizeScale = Vec3(1.0f, 1.0f, 1.0f);
+    Vec3 rootGroundOffset = Vec3(0.0f, 0.0f, 0.0f);
 
     SkeletalMeshInstance()
         : activeDeformedMesh(std::make_shared<SurrealMesh>()),
@@ -258,6 +313,63 @@ public:
         EnsureFootBaseOffsetInitialized();
         skinPaletteVersion++;
         return true;
+    }
+
+    void EvaluateRestPoseGlobals() {
+        const size_t jc = joints.size();
+        for (size_t i = 0; i < jc; ++i) {
+            joints[i].localTranslation = joints[i].baseTranslation;
+            joints[i].localRotation = joints[i].baseRotation;
+            joints[i].localScale = joints[i].baseScale;
+            if (!joints[i].hasExplicitMatrix) {
+                Vec3 scaledTr(
+                    joints[i].localTranslation.x * joints[i].boneLengthScale.x,
+                    joints[i].localTranslation.y * joints[i].boneLengthScale.y,
+                    joints[i].localTranslation.z * joints[i].boneLengthScale.z
+                );
+                joints[i].localMatrix = Mat4::Translation(scaledTr) *
+                                        Mat4::FromQuat(joints[i].localRotation) *
+                                        Mat4::Scaling(joints[i].localScale);
+            }
+        }
+        if (evalDone.size() != jc) evalDone.resize(jc, 0);
+        else std::fill(evalDone.begin(), evalDone.end(), 0);
+
+        auto evalGlobal = [&](auto& self, int idx) -> void {
+            if (evalDone[idx]) return;
+            SkeletonJoint& j = joints[idx];
+            if (j.parentIndex >= 0 && j.parentIndex < (int)jc) {
+                self(self, j.parentIndex);
+                j.globalMatrix = joints[j.parentIndex].globalMatrix * j.localMatrix;
+            } else {
+                j.globalMatrix = Mat4::Translation(rootGroundOffset) *
+                                 Mat4::Scaling(rootNormalizeScale) *
+                                 j.localMatrix;
+            }
+            evalDone[idx] = 1;
+        };
+        for (size_t i = 0; i < jc; ++i) evalGlobal(evalGlobal, static_cast<int>(i));
+    }
+
+    void RecomputeSkinIBMsFromCurrentGlobals() {
+        const size_t jc = joints.size();
+        for (size_t i = 0; i < jc; ++i) {
+            joints[i].inverseBindMatrix = joints[i].globalMatrix.Inversed();
+        }
+        if (!skinJointNodeIndices.empty()) {
+            skinJointIBMs.resize(skinJointNodeIndices.size(), Mat4::Identity());
+            skinMatrices.resize(skinJointNodeIndices.size(), Mat4::Identity());
+            for (size_t s = 0; s < skinJointNodeIndices.size(); ++s) {
+                int nodeIdx = skinJointNodeIndices[s];
+                if (nodeIdx >= 0 && nodeIdx < (int)jc) {
+                    skinJointIBMs[s] = joints[nodeIdx].inverseBindMatrix;
+                }
+            }
+        } else {
+            skinMatrices.resize(jc, Mat4::Identity());
+        }
+        hasFootBaseOffset = false;
+        staticAttributesInitialized = false;
     }
 
     /**
@@ -403,7 +515,12 @@ private:
 
         for (auto& j : joints) {
             if (!j.hasExplicitMatrix) {
-                j.localMatrix = Mat4::Translation(j.localTranslation) *
+                Vec3 scaledTr(
+                    j.localTranslation.x * j.boneLengthScale.x,
+                    j.localTranslation.y * j.boneLengthScale.y,
+                    j.localTranslation.z * j.boneLengthScale.z
+                );
+                j.localMatrix = Mat4::Translation(scaledTr) *
                                 Mat4::FromQuat(j.localRotation) *
                                 Mat4::Scaling(j.localScale);
             }
@@ -421,7 +538,9 @@ private:
                 self(self, j.parentIndex);
                 j.globalMatrix = joints[j.parentIndex].globalMatrix * j.localMatrix;
             } else {
-                j.globalMatrix = j.localMatrix;
+                j.globalMatrix = Mat4::Translation(rootGroundOffset) *
+                                 Mat4::Scaling(rootNormalizeScale) *
+                                 j.localMatrix;
             }
             evalDone[idx] = 1;
         };
@@ -720,9 +839,39 @@ public:
             if (img->buffer_view && img->buffer_view->buffer && img->buffer_view->buffer->data) {
                 const uint8_t* ptr = (const uint8_t*)img->buffer_view->buffer->data + img->buffer_view->offset;
                 pix = stbi_load_from_memory(ptr, (int)img->buffer_view->size, &w, &h, &ch, 4);
+                if (!pix) {
+                    auto webp = DecodeWebPRGBA(ptr, (size_t)img->buffer_view->size, &w, &h);
+                    if (!webp.empty()) {
+                        res.w = w;
+                        res.h = h;
+                        res.rgba = std::make_shared<std::vector<uint8_t>>(std::move(webp));
+                        texCache[key] = res;
+                        return res;
+                    }
+                }
             } else if (img->uri) {
                 std::string full = baseDir + "/" + img->uri;
                 pix = stbi_load(full.c_str(), &w, &h, &ch, 4);
+                if (!pix) {
+                    std::ifstream wf(full, std::ios::binary | std::ios::ate);
+                    if (wf) {
+                        std::streamsize sz = wf.tellg();
+                        wf.seekg(0, std::ios::beg);
+                        if (sz > 12) {
+                            std::vector<uint8_t> raw(static_cast<size_t>(sz));
+                            if (wf.read(reinterpret_cast<char*>(raw.data()), sz)) {
+                                auto webp = DecodeWebPRGBA(raw.data(), raw.size(), &w, &h);
+                                if (!webp.empty()) {
+                                    res.w = w;
+                                    res.h = h;
+                                    res.rgba = std::make_shared<std::vector<uint8_t>>(std::move(webp));
+                                    texCache[key] = res;
+                                    return res;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             if (pix) {
                 res.w = w;
@@ -762,11 +911,13 @@ public:
                     const cgltf_accessor* posAcc = nullptr;
                     const cgltf_accessor* normAcc = nullptr;
                     const cgltf_accessor* uvAcc = nullptr;
+                    const cgltf_accessor* colorAcc = nullptr;
 
                     for (cgltf_size a = 0; a < prim.attributes_count; ++a) {
                         if (prim.attributes[a].type == cgltf_attribute_type_position) posAcc = prim.attributes[a].data;
                         else if (prim.attributes[a].type == cgltf_attribute_type_normal) normAcc = prim.attributes[a].data;
                         else if (prim.attributes[a].type == cgltf_attribute_type_texcoord && prim.attributes[a].index == 0) uvAcc = prim.attributes[a].data;
+                        else if (prim.attributes[a].type == cgltf_attribute_type_color && prim.attributes[a].index == 0) colorAcc = prim.attributes[a].data;
                     }
                     if (!posAcc) continue;
 
@@ -774,12 +925,12 @@ public:
                     if (prim.material) {
                         if (prim.material->has_pbr_metallic_roughness) {
                             const auto& pbr = prim.material->pbr_metallic_roughness;
-                            if (pbr.base_color_factor[3] < 0.05f && (!pbr.base_color_texture.texture || !pbr.base_color_texture.texture->image)) {
+                            if (pbr.base_color_factor[3] < 0.05f && !ResolveGlTFTextureImage(pbr.base_color_texture.texture)) {
                                 continue; // Skip invisible collision or fog mesh
                             }
                         } else if (prim.material->has_pbr_specular_glossiness) {
                             const auto& sg = prim.material->pbr_specular_glossiness;
-                            if (sg.diffuse_factor[3] < 0.05f && (!sg.diffuse_texture.texture || !sg.diffuse_texture.texture->image)) {
+                            if (sg.diffuse_factor[3] < 0.05f && !ResolveGlTFTextureImage(sg.diffuse_texture.texture)) {
                                 continue;
                             }
                         }
@@ -809,16 +960,16 @@ public:
                         if (prim.material->alpha_mode == cgltf_alpha_mode_mask) sub.alphaMode = PBRMaterial::AlphaMode::MASK_MODE;
                         else if (prim.material->alpha_mode == cgltf_alpha_mode_blend) sub.alphaMode = PBRMaterial::AlphaMode::BLEND_MODE;
 
-                        if (prim.material->normal_texture.texture && prim.material->normal_texture.texture->image) {
-                            RawTex rt = getTex(prim.material->normal_texture.texture->image);
+                        if (cgltf_image* nImg = ResolveGlTFTextureImage(prim.material->normal_texture.texture)) {
+                            RawTex rt = getTex(nImg);
                             sub.normalTexW = rt.w; sub.normalTexH = rt.h; sub.normalTexRGBA = rt.rgba;
                         }
-                        if (prim.material->occlusion_texture.texture && prim.material->occlusion_texture.texture->image) {
-                            RawTex rt = getTex(prim.material->occlusion_texture.texture->image);
+                        if (cgltf_image* aoImg = ResolveGlTFTextureImage(prim.material->occlusion_texture.texture)) {
+                            RawTex rt = getTex(aoImg);
                             sub.aoTexW = rt.w; sub.aoTexH = rt.h; sub.aoTexRGBA = rt.rgba;
                         }
-                        if (prim.material->emissive_texture.texture && prim.material->emissive_texture.texture->image) {
-                            RawTex rt = getTex(prim.material->emissive_texture.texture->image);
+                        if (cgltf_image* emImg = ResolveGlTFTextureImage(prim.material->emissive_texture.texture)) {
+                            RawTex rt = getTex(emImg);
                             sub.emissiveTexW = rt.w; sub.emissiveTexH = rt.h; sub.emissiveTexRGBA = rt.rgba;
                         }
 
@@ -828,8 +979,8 @@ public:
                             sub.metallic = pbr.metallic_factor;
                             sub.roughness = pbr.roughness_factor;
 
-                            if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
-                                RawTex rt = getTex(pbr.base_color_texture.texture->image);
+                            if (cgltf_image* bcImg = ResolveGlTFTextureImage(pbr.base_color_texture.texture)) {
+                                RawTex rt = getTex(bcImg);
                                 sub.texWidth = rt.w;
                                 sub.texHeight = rt.h;
                                 sub.texRGBA = rt.rgba;
@@ -842,8 +993,8 @@ public:
                                     uvOffset[1] = pbr.base_color_texture.transform.offset[1];
                                 }
                             }
-                            if (pbr.metallic_roughness_texture.texture && pbr.metallic_roughness_texture.texture->image) {
-                                RawTex rt = getTex(pbr.metallic_roughness_texture.texture->image);
+                            if (cgltf_image* mrImg = ResolveGlTFTextureImage(pbr.metallic_roughness_texture.texture)) {
+                                RawTex rt = getTex(mrImg);
                                 sub.mrTexW = rt.w; sub.mrTexH = rt.h; sub.mrTexRGBA = rt.rgba;
                             }
                         } else if (prim.material->has_pbr_specular_glossiness) {
@@ -852,8 +1003,8 @@ public:
                             sub.metallic = 0.08f;
                             sub.roughness = std::max(0.15f, 1.0f - sg.glossiness_factor);
 
-                            if (sg.diffuse_texture.texture && sg.diffuse_texture.texture->image) {
-                                RawTex rt = getTex(sg.diffuse_texture.texture->image);
+                            if (cgltf_image* sgImg = ResolveGlTFTextureImage(sg.diffuse_texture.texture)) {
+                                RawTex rt = getTex(sgImg);
                                 sub.texWidth = rt.w;
                                 sub.texHeight = rt.h;
                                 sub.texRGBA = rt.rgba;
@@ -948,7 +1099,14 @@ public:
                                 vert.v = uv[1];
                             }
                         }
-                        vert.color = Vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                        if (colorAcc) {
+                            float cv[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                            int comps = (colorAcc->type == cgltf_type_vec4) ? 4 : 3;
+                            cgltf_accessor_read_float(colorAcc, v, cv, comps);
+                            vert.color = Vec4(cv[0], cv[1], cv[2], (comps == 4) ? cv[3] : 1.0f);
+                        } else {
+                            vert.color = Vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                        }
                     }
 
                     if (prim.indices) {
@@ -1124,22 +1282,22 @@ public:
                     if (prim.material->alpha_mode == cgltf_alpha_mode_mask) sub.alphaMode = PBRMaterial::AlphaMode::MASK_MODE;
                     else if (prim.material->alpha_mode == cgltf_alpha_mode_blend) sub.alphaMode = PBRMaterial::AlphaMode::BLEND_MODE;
 
-                    if (prim.material->normal_texture.texture && prim.material->normal_texture.texture->image) {
-                        RawTex rt = getTex(prim.material->normal_texture.texture->image);
+                    if (cgltf_image* nImg = ResolveGlTFTextureImage(prim.material->normal_texture.texture)) {
+                        RawTex rt = getTex(nImg);
                         sub.normalTexW = rt.w; sub.normalTexH = rt.h; sub.normalTexRGBA = rt.rgba;
                     }
-                    if (prim.material->occlusion_texture.texture && prim.material->occlusion_texture.texture->image) {
-                        RawTex rt = getTex(prim.material->occlusion_texture.texture->image);
+                    if (cgltf_image* aoImg = ResolveGlTFTextureImage(prim.material->occlusion_texture.texture)) {
+                        RawTex rt = getTex(aoImg);
                         sub.aoTexW = rt.w; sub.aoTexH = rt.h; sub.aoTexRGBA = rt.rgba;
                     }
-                    if (prim.material->emissive_texture.texture && prim.material->emissive_texture.texture->image) {
-                        RawTex rt = getTex(prim.material->emissive_texture.texture->image);
+                    if (cgltf_image* emImg = ResolveGlTFTextureImage(prim.material->emissive_texture.texture)) {
+                        RawTex rt = getTex(emImg);
                         sub.emissiveTexW = rt.w; sub.emissiveTexH = rt.h; sub.emissiveTexRGBA = rt.rgba;
                     }
 
                     if (prim.material->has_pbr_metallic_roughness) {
                         const auto& pbr = prim.material->pbr_metallic_roughness;
-                        if (pbr.base_color_factor[3] < 0.05f && (!pbr.base_color_texture.texture || !pbr.base_color_texture.texture->image)) {
+                        if (pbr.base_color_factor[3] < 0.05f && !ResolveGlTFTextureImage(pbr.base_color_texture.texture)) {
                             continue;
                         }
                         baseFactor[0] = pbr.base_color_factor[0];
@@ -1150,19 +1308,19 @@ public:
                         sub.metallic = pbr.metallic_factor;
                         sub.roughness = pbr.roughness_factor;
 
-                        if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
-                            RawTex rt = getTex(pbr.base_color_texture.texture->image);
+                        if (cgltf_image* bcImg = ResolveGlTFTextureImage(pbr.base_color_texture.texture)) {
+                            RawTex rt = getTex(bcImg);
                             sub.texWidth = rt.w;
                             sub.texHeight = rt.h;
                             sub.texRGBA = rt.rgba;
                         }
-                        if (pbr.metallic_roughness_texture.texture && pbr.metallic_roughness_texture.texture->image) {
-                            RawTex rt = getTex(pbr.metallic_roughness_texture.texture->image);
+                        if (cgltf_image* mrImg = ResolveGlTFTextureImage(pbr.metallic_roughness_texture.texture)) {
+                            RawTex rt = getTex(mrImg);
                             sub.mrTexW = rt.w; sub.mrTexH = rt.h; sub.mrTexRGBA = rt.rgba;
                         }
                     } else if (prim.material->has_pbr_specular_glossiness) {
                         const auto& sg = prim.material->pbr_specular_glossiness;
-                        if (sg.diffuse_factor[3] < 0.05f && (!sg.diffuse_texture.texture || !sg.diffuse_texture.texture->image)) {
+                        if (sg.diffuse_factor[3] < 0.05f && !ResolveGlTFTextureImage(sg.diffuse_texture.texture)) {
                             continue;
                         }
                         baseFactor[0] = sg.diffuse_factor[0];
@@ -1173,8 +1331,8 @@ public:
                         sub.metallic = 0.08f;
                         sub.roughness = std::max(0.15f, 1.0f - sg.glossiness_factor);
 
-                        if (sg.diffuse_texture.texture && sg.diffuse_texture.texture->image) {
-                            RawTex rt = getTex(sg.diffuse_texture.texture->image);
+                        if (cgltf_image* sgImg = ResolveGlTFTextureImage(sg.diffuse_texture.texture)) {
+                            RawTex rt = getTex(sgImg);
                             sub.texWidth = rt.w;
                             sub.texHeight = rt.h;
                             sub.texRGBA = rt.rgba;
@@ -1185,6 +1343,7 @@ public:
                 const cgltf_accessor* posAcc = nullptr;
                 const cgltf_accessor* normAcc = nullptr;
                 const cgltf_accessor* uvAcc = nullptr;
+                const cgltf_accessor* colorAcc = nullptr;
                 const cgltf_accessor* jointAcc = nullptr;
                 const cgltf_accessor* weightAcc = nullptr;
 
@@ -1193,6 +1352,7 @@ public:
                     if (attr.type == cgltf_attribute_type_position) posAcc = attr.data;
                     else if (attr.type == cgltf_attribute_type_normal) normAcc = attr.data;
                     else if (attr.type == cgltf_attribute_type_texcoord && attr.index == 0) uvAcc = attr.data;
+                    else if (attr.type == cgltf_attribute_type_color && attr.index == 0) colorAcc = attr.data;
                     else if (attr.type == cgltf_attribute_type_joints && attr.index == 0) jointAcc = attr.data;
                     else if (attr.type == cgltf_attribute_type_weights && attr.index == 0) weightAcc = attr.data;
                 }
@@ -1234,6 +1394,16 @@ public:
                     }
 
                     float colR = sub.albedo.r, colG = sub.albedo.g, colB = sub.albedo.b;
+                    float colA = 1.0f;
+                    if (colorAcc) {
+                        float cv[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                        int comps = (colorAcc->type == cgltf_type_vec4) ? 4 : 3;
+                        cgltf_accessor_read_float(colorAcc, v, cv, comps);
+                        colR *= cv[0];
+                        colG *= cv[1];
+                        colB *= cv[2];
+                        if (comps == 4) colA = cv[3];
+                    }
                     if (sub.texRGBA && !sub.texRGBA->empty() && uvAcc) {
                         float u_wrap = vert.u - std::floor(vert.u);
                         float v_wrap = vert.v - std::floor(vert.v);
@@ -1245,7 +1415,7 @@ public:
                         colG *= (*sub.texRGBA)[pIdx + 1] / 255.0f;
                         colB *= (*sub.texRGBA)[pIdx + 2] / 255.0f;
                     }
-                    vert.color = Vec4(colR, colG, colB, 1.0f);
+                    vert.color = Vec4(colR, colG, colB, colA);
 
                     if (attachRigidToNode) {
                         vert.joints[0] = static_cast<uint16_t>(rigidSlot);

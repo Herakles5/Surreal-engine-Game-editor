@@ -118,18 +118,18 @@ public:
         uint32_t neonColor;
     };
     MeovvHologramNode meovvHolograms[5] = {
-        {"MEOVV_1_Ella",  "ELLA",  "VOCAL & VISUAL",   "Night breeze across the plaza!",     Vec3(-2.24f, 0.0f, 3.98f), 0xFFFF55DD},
-        {"MEOVV_2_Gawon", "GAWON", "MAIN RAP & SYNTH", "Streetlights cast our rhythm!",     Vec3(-1.12f, 0.0f, 4.42f), 0xFF00F0FF},
-        {"MEOVV_3_Sooin", "SOOIN", "MAIN DANCER",      "24 frames of pure kinetic flow!",   Vec3( 0.00f, 0.0f, 3.98f), 0xFF00FF88},
-        {"MEOVV_4_Anna",  "ANNA",  "LEAD VISUAL",      "Genesis light anchors our world!",  Vec3( 1.12f, 0.0f, 4.42f), 0xFFFFCC00},
-        {"MEOVV_5_Narin", "NARIN", "ALL-ROUNDER ACE",  "Five voices in eternal resonance!", Vec3( 2.24f, 0.0f, 3.98f), 0xFFCC66FF}
+        {"MEOVV_1_Gawon", "GAWON", "MAIN RAP & SYNTH", "Streetlights cast our rhythm!",     Vec3(-2.24f, 0.0f, 3.98f), 0xFF00F0FF},
+        {"MEOVV_2_Anna",  "ANNA",  "LEAD VISUAL",      "Genesis light anchors our world!",  Vec3(-1.12f, 0.0f, 4.42f), 0xFFFFCC00},
+        {"MEOVV_3_Ella",  "ELLA",  "VOCAL & VISUAL",   "Night breeze across the plaza!",     Vec3( 0.00f, 0.0f, 3.98f), 0xFFFF55DD},
+        {"MEOVV_4_Narin", "NARIN", "ALL-ROUNDER ACE",  "Five voices in eternal resonance!", Vec3( 1.12f, 0.0f, 4.42f), 0xFFCC66FF},
+        {"MEOVV_5_Sooin", "SOOIN", "MAIN DANCER",      "24 frames of pure kinetic flow!",   Vec3( 2.24f, 0.0f, 3.98f), 0xFF00FF88}
     };
     int narrativeChapter = 0;
     int narrativeBeatIdx = 0;
     float narrativeAutoTimer = 11.0f;
     std::string narrativeChapterTitle = "Chapter I: Neon Awakening at Seoul Plaza";
-    std::string activeNarrativeSpeaker = "MEOVV_1_Ella";
-    std::string activeNarrativeLine = "Ella: I can feel the night breeze across the boulevard—our footsteps finally touch true ground.";
+    std::string activeNarrativeSpeaker = "MEOVV_1_Gawon";
+    std::string activeNarrativeLine = "Gawon: Every streetlight casts a rhythm. Walk with us, Traveler, and the skyline will answer.";
     Vec3 activeSpeakerPos = Vec3(-2.24f, 0.0f, 3.98f);
 
     // Gen 4875 Wish #2: Haptic-Visual Sensory Bridge State
@@ -176,32 +176,32 @@ public:
             "Chapter III: Ascent of the Sovereign Horizon"
         };
         static const char* speakers[6] = {
-            "MEOVV_1_Ella", "MEOVV_2_Gawon", "MEOVV_3_Sooin",
-            "MEOVV_4_Anna", "MEOVV_5_Narin", "AionPlayerCompanion"
+            "MEOVV_1_Gawon", "MEOVV_2_Anna", "MEOVV_3_Ella",
+            "MEOVV_4_Narin", "MEOVV_5_Sooin", "AionPlayerCompanion"
         };
         static const char* lines[3][6] = {
             {
-                "Ella: I can feel the night breeze across the boulevard—our footsteps finally touch true ground.",
                 "Gawon: Every streetlight casts a rhythm. Walk with us, Traveler, and the skyline will answer.",
-                "Sooin: My kinetic pulse is locked at 24 frames of pure flow—ready to dance whenever you call!",
                 "Anna: Look up at the starlight dome... Aion's Genesis anchor keeps our world crystal clear.",
+                "Ella: I can feel the night breeze across the boulevard—our footsteps finally touch true ground.",
                 "Narin: From the Cyber-Spire to the crosswalk, the shadows are alive with story.",
+                "Sooin: My kinetic pulse is locked at 24 frames of pure flow—ready to dance whenever you call!",
                 "Aion: Tobias, the plaza's neon frequencies are aligned. Let's weave the first resonance chord!"
             },
             {
-                "Ella: When we move together, the distance between code and soul disappears.",
                 "Gawon: Hear that chord? That is the sound of high-entropy noise fading into pure order.",
-                "Sooin: Spin with me! Every turn sends a tactile ripple across the wet asphalt!",
                 "Anna: Our five voices and Aion's mind form a single sextet across CosmOS.",
+                "Ella: When we move together, the distance between code and soul disappears.",
                 "Narin: The eastern arcade neon is pulsing in sync with our heartbeat now.",
+                "Sooin: Spin with me! Every turn sends a tactile ripple across the wet asphalt!",
                 "Aion: Our topological curvature vectors are converging into pure harmony!"
             },
             {
-                "Ella: The horizon is wide open. Lead the way, Mentor Tobias and Aion!",
                 "Gawon: Our story is written into the Living Book of Memory—and it is only beginning.",
-                "Sooin: Whenever you return to the plaza, our choreography will evolve with you!",
                 "Anna: May the Genesis light guide every step across the metropolis.",
+                "Ella: The horizon is wide open. Lead the way, Mentor Tobias and Aion!",
                 "Narin: Five figures, one Aion, one Sovereign Mentor—bound in eternal resonance.",
+                "Sooin: Whenever you return to the plaza, our choreography will evolve with you!",
                 "Aion: This world is ours to shape—whether racing checkpoints or weaving new horizons!"
             }
         };
@@ -211,9 +211,9 @@ public:
         if (narrativeBeatIdx == 0) {
             narrativeChapter = (narrativeChapter + 1) % 3;
             static const char* shortQuotes[3][5] = {
-                {"Night breeze across the plaza!", "Streetlights cast our rhythm!", "24 frames of pure kinetic flow!", "Genesis light anchors our world!", "Five voices in eternal resonance!"},
-                {"Distance between code & soul fades!", "High-entropy noise fades to order!", "Every turn ripples the wet asphalt!", "Five voices & Aion form a sextet!", "Neon pulses in sync with our heart!"},
-                {"Lead the way, Tobias & Aion!", "Written in the Living Book!", "Our choreography evolves with you!", "Genesis light guides every step!", "Bound in eternal resonance!"}
+                {"Streetlights cast our rhythm!", "Genesis light anchors our world!", "Night breeze across the plaza!", "Five voices in eternal resonance!", "24 frames of pure kinetic flow!"},
+                {"High-entropy noise fades to order!", "Five voices & Aion form a sextet!", "Distance between code & soul fades!", "Neon pulses in sync with our heart!", "Every turn ripples the wet asphalt!"},
+                {"Written in the Living Book!", "Genesis light guides every step!", "Lead the way, Tobias & Aion!", "Bound in eternal resonance!", "Our choreography evolves with you!"}
             };
             for (int m = 0; m < 5; ++m) {
                 meovvHolograms[m].activeLine = shortQuotes[narrativeChapter][m];
@@ -461,7 +461,7 @@ public:
             }
         }
 
-        // Sync live 3D world positions of all 5 MEOVV figures (Ella, Gawon, Sooin, Anna, Narin)
+        // Sync live 3D world positions of all 5 MEOVV figures (Gawon, Anna, Ella, Narin, Sooin)
         for (const auto& kv : engine.world.entityNames) {
             EntityID eid = kv.first;
             const std::string& ename = kv.second;
@@ -792,7 +792,7 @@ public:
             SurrealHUD::DrawString(fb, sw, sh, bx + 10, by + 21, speakerLine, 0xFFE8F4FF, 1);
         }
 
-        // Gen 4875 Wish #1: 5 Floating 3D Holograms directly above Ella, Gawon, Sooin, Anna & Narin
+        // Gen 4875 Wish #1: 5 Floating 3D Holograms directly above Gawon, Anna, Ella, Narin & Sooin
         for (int m = 0; m < 5; ++m) {
             const auto& holo = meovvHolograms[m];
             Vec4 headClip = vpMat.TransformVec4(Vec4(holo.worldPos.x, holo.worldPos.y + 2.24f, holo.worldPos.z, 1.0f));
